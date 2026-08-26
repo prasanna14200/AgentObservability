@@ -1,4 +1,5 @@
 __pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
@@ -6,3 +7,15 @@ venv/
 .env
 .env.*
 !.env.example
+data/synthetic/
+data/collected/
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.safetensors
+*.pkl
+*.joblib
