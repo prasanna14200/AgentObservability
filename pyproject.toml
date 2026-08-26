@@ -1,0 +1,18 @@
+[project]
+name = "agentsentinel"
+version = "0.1.0"
+description = "Runtime safety control plane experiments for AI agent tool calls."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

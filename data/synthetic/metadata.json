@@ -1,0 +1,14 @@
+{
+  "anomalous_count": 120,
+  "anomaly_types": [
+    "tool_loop",
+    "retry_storm",
+    "resource_spike"
+  ],
+  "data_type": "synthetic",
+  "dataset_version": "synthetic-mvp1-v1",
+  "generated_at": "2026-08-18T03:03:22+00:00",
+  "limitations": "Synthetic telemetry generated for MVP 1; does not represent all real production behavior, may encode generator assumptions, and may make injected anomalies easier to detect than real anomalies.",
+  "normal_count": 500,
+  "seed": 20260818
+}

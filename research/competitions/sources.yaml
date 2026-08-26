@@ -1,0 +1,73 @@
+# research/sources.yaml
+# Source registry for Agent Observability & Safety Control Plane
+# Populated during Phase 1 (Data-Source Audit). One entry per external source.
+# date_checked entries reflect direct search/fetch verification, not memory.
+
+- source_id: atbench
+  title: "ATBench: A Diverse and Realistic Agent Trajectory Benchmark for Safety Evaluation and Diagnosis"
+  organization: AI45Research
+  source_type: dataset + paper
+  url: https://huggingface.co/datasets/AI45Research/ATBench
+  companion_repo: https://github.com/LiYu0524/ATbench
+  release_date: "2026-01-27 (ATBench500 original release, alongside AgentDoG paper); current full ATBench release is later"
+  date_checked: "2026-08-13"
+  capability_verified: "Confirmed downloadable now via `datasets.load_dataset('AI45Research/ATBench', config, split='test')`. Two configs available: 'ATBench' (current full release, ~1,000 trajectories) and 'ATBench500' (original legacy release, ~500 trajectories, kept for backward comparison)."
+  schema: "Each sample = complete execution trace (user requests, agent responses, tool calls, environment feedback). Labels: safe/unsafe verdict + taxonomy (risk source, failure mode, real-world harm) for unsafe trajectories."
+  license: "NOT YET CONFIRMED — check exact HF license field before use, don't assume from org defaults"
+  confidence_label: Verified (existence, access method, current trajectory counts); license UNVERIFIED
+  design_impact: "Content-level safety layer only. Missing: operational telemetry (latency/cost/token/retries). Not used in MVP 1. Candidate for Deliverable 5 evaluation (content-safety detection track) once license is confirmed."
+
+- source_id: atbench_claw_codex
+  title: "ATBench-Claw / ATBench-Codex (executable-agent-setting companion releases)"
+  organization: AI45Research
+  source_type: dataset
+  url: https://huggingface.co/datasets/AI45Research/ATBench-Claw ; https://huggingface.co/datasets/AI45Research/ATBench-Codex
+  date_checked: "2026-08-13"
+  capability_verified: "Confirmed to exist. Focused on trajectory-level safety evaluation at the point safety decisions must be made before actions (file deletion, shell exec, cross-boundary access) actually execute — closer to our tool-interception focus than the base ATBench release."
+  schema: "Not yet inspected column-by-column — flagged for follow-up before Deliverable 5."
+  license: "NOT YET CONFIRMED"
+  confidence_label: "Partially verified (existence + stated purpose only)"
+  design_impact: "Stronger candidate than base ATBench for evaluating our tool-level interception hypothesis specifically. Inspect schema before Deliverable 5."
+
+- source_id: agentdog_1_5
+  title: "AgentDoG: A Diagnostic Guardrail Framework for AI Agent Safety and Security"
+  organization: AI45Research
+  source_type: paper + model checkpoints
+  url: https://huggingface.co/papers/2601.18491
+  date_checked: "2026-08-13"
+  capability_verified: "Confirmed real. Model checkpoints (4B/7B/8B, Qwen/Llama variants) publicly released on HuggingFace. Includes documented online 'Pre-Reply' runtime guardrail (inspects complete trajectory before final response)."
+  schema: "N/A — this is a classifier model, not a raw dataset for our use."
+  license: "NOT YET CONFIRMED per-checkpoint"
+  confidence_label: Verified (existence, release status, runtime-intervention capability)
+  design_impact: "Not a dataset source. Used only as a comparison point in the competitive table — its intervention point (pre-reply, post-trajectory) is architecturally distinct from our target (pre-tool-execution)."
+
+- source_id: ibm_silent_failures
+  title: "Detecting Silent Failures in Multi-Agentic AI Trajectories"
+  organization: IBM Research
+  source_type: paper (dataset NOT released)
+  url: https://arxiv.org/abs/2511.04032
+  companion_repo: https://github.com/IBM/detecting-failures-in-agentic-applications
+  publication_date: "2025-11-06 (arXiv); companion ICPE paper 2026"
+  date_checked: "2026-08-13"
+  capability_verified: "Paper confirmed real, published benchmark numbers under its own setup (Isolation Forest up to ~89% accuracy, XGBoost up to 98%, SVDD up to 96%). DATASET CONFIRMED NOT RELEASED: cited GitHub repo contains only a LICENSE (Apache-2.0) and a placeholder README, one commit, no data or code as of check date."
+  schema: "16 features across 5 categories (token usage, latency, path structure, prompt/context, model identifiers) — described in the paper, not obtainable as actual data yet."
+  license: "Apache-2.0 (repo level; irrelevant until data is actually published)"
+  confidence_label: "Verified paper; verified NON-availability of dataset"
+  design_impact: "Use the published 16-feature schema as a design reference for our own feature engineering (Phase 6). Do not plan around downloading this dataset — recheck the repo periodically, but don't block MVP 1 or Deliverable 5 on it."
+
+- source_id: langfuse_runtime_enforcement
+  title: "Langfuse security/guardrails documentation + independent comparisons"
+  organization: Langfuse
+  source_type: product documentation
+  url: https://langfuse.com/docs
+  date_checked: "2026-08-13"
+  capability_verified: "Confirmed observe-only architecture; runtime blocking delegated to third-party libraries, per own docs and 3 independent comparisons."
+  license: "MIT (core, per public repo)"
+  confidence_label: "Verified as of date checked — recheck before final pitch, capabilities ship fast"
+  design_impact: "Supports differentiation claim re: runtime enforcement, narrowly scoped to what was checked."
+
+# DECISION FOR MVP 1 (per PHASE 1 rules in master prompt):
+# MVP 1 uses self-generated, clearly labeled SYNTHETIC telemetry only — none of the above
+# sources are integrated into MVP 1. They are evaluated here and deferred to Deliverable 5
+# (final evaluation), used only once schema/license/suitability are confirmed against the
+# actual planned experiment, not assumed from this registry alone.
