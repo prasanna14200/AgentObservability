@@ -23,3 +23,28 @@ What was deliberately left out:
 - No risk or policy decision object; Phases 12-13 own that boundary.
 - No database model or migration; Phase 20 owns persistence.
 - No live request or FastAPI wrapper; Phase 13 introduces the live safety path.
+
+## Phase 4 — Local Trace Collection
+
+`TraceCollector` writes accepted traces to local JSONL files under `data/collected/` using the same label-based convention as Phase 2. This keeps MVP 1 reproducible with local files and avoids introducing OpenTelemetry, FastAPI, Postgres, or external services before the phases that need them.
+
+Why file-based collection now:
+
+- Phase 4 needs a reusable capture mechanism, not a distributed telemetry stack.
+- JSONL matches the Phase 2 data format and keeps later preprocessing simple.
+- Local files are easy to test deterministically and inspect during interviews.
+- OTel export belongs to Phase 14, and database persistence belongs to Phase 20.
+
+Malformed-input policy:
+
+- Invalid payloads are rejected.
+- The collector returns `None` instead of crashing the caller.
+- A sanitized copy of the payload and the validation reason are written to `data/collected/rejected/rejections.jsonl`.
+- Partial acceptance is deliberately avoided because later audit replay must not depend on half-valid records.
+
+What is deferred:
+
+- Runtime interception and live request handling are deferred to Phase 13.
+- Fail-open/fail-closed behavior is deferred to the policy and runtime phases.
+- OpenTelemetry abstraction is deferred to Phase 14.
+- Model, telemetry, and service outage behavior is deferred to Phase 15.

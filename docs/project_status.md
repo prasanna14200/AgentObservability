@@ -10,9 +10,9 @@ Important invariant: anomaly signals are advisory. A deterministic policy engine
 
 ## Current Phase
 
-**Phase 3 — Trace Schema**
+**Phase 4 — Instrumentation / Collection**
 
-Goal: define the canonical Pydantic schema consumed by later feature, detector, risk, policy, and audit phases. Privacy/redaction rules start at schema ingestion.
+Goal: build the local collector that validates, redacts, and records trace payloads without adding a live request path, policy engine, network service, or database.
 
 ## Locked Work
 
@@ -27,18 +27,18 @@ Goal: define the canonical Pydantic schema consumed by later feature, detector, 
 | --- | --- | --- |
 | Phase 2 — Synthetic trace generation | Complete | `src/agentsentinel/data/synth_traces.py`, `data/synthetic/normal/`, `data/synthetic/anomalous/`, Phase 2 tests |
 | Phase 3 — Trace schema | Complete | `src/agentsentinel/schema/trace.py`, `src/agentsentinel/schema/redaction.py`, `tests/unit/test_trace_schema.py`, `docs/design_decisions.md` |
+| Phase 4 — Instrumentation / collection | Complete | `src/agentsentinel/observability/collector.py`, `tests/integration/test_collector.py`, local JSONL sink under `data/collected/` |
 
 ## Latest Checkpoint
 
-Phase 3 is complete.
+Phase 4 is complete.
 
 Actual output:
 
-- Canonical Pydantic trace schema defined.
-- Redaction/hash utility implemented.
-- All 620 Phase 2 traces validate with zero data loss.
-- `data_type` and `limitations` are preserved.
-- Tests pass: 9 passed.
+- Git prerequisite completed with catch-up commit `be2ede6`.
+- `TraceCollector` validates, redacts, and writes accepted traces to a local JSONL sink.
+- Malformed inputs are rejected with documented reasons and sanitized rejection logs.
+- Tests pass: 11 passed.
 
 ## MVP 1 Scope
 
@@ -86,3 +86,14 @@ Phase 2 contributes the data needed for Gate A:
 - [x] `data_type` and `limitations` fields are preserved from Phase 2 output.
 - [x] Tests pass.
 - [x] `docs/design_decisions.md` updated.
+
+## Phase 4 Checkpoint Criteria
+
+- [x] Git repository initialized, `.gitignore` in place, Phase 0-3 catch-up commit made and confirmed via `git log`.
+- [x] `TraceCollector` implemented; validates, redacts, and writes to `data/collected/`.
+- [x] Malformed-input behavior implemented and documented.
+- [x] Integration test harness runs normal, anomalous, and malformed events through the collector.
+- [x] No unredacted secret-shaped field reaches the JSONL sink.
+- [x] Tests pass.
+- [x] `docs/design_decisions.md` updated.
+- [x] New commit made for Phase 4 work specifically.
