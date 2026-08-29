@@ -9,20 +9,37 @@ from typing import Any
 SENSITIVE_KEY_PARTS = (
     "api_key",
     "apikey",
-    "access_token",
-    "auth_token",
-    "refresh_token",
     "password",
     "credential",
     "secret",
 )
+
+# "token" is handled separately from SENSITIVE_KEY_PARTS, not folded into it
+# as a plain substring. A blind substring match on "token" would also catch
+# legitimate operational metrics like "token_usage"/"token_count" (see
+# ResourceUsage.token_usage in schema/trace.py), which are not secrets and
+# must remain raw for later phases (Phase 6 feature engineering needs the
+# actual numeric value). Credential-shaped token keys ("token",
+# "access_token", "session_token", "bearer_token", "id_token", ...) all have
+# "token" as the *trailing* "_"-separated segment; metric-shaped keys
+# ("token_usage", "token_count") have "token" as a *leading* segment
+# followed by a metric suffix. Matching on the trailing segment distinguishes
+# the two reliably. See Phase 4 patch note in docs/phase4_completion.md for
+# the leak (bare/compound token fields were unredacted) this closes.
+
+
+def _has_sensitive_token_segment(normalized: str) -> bool:
+    segments = normalized.split("_")
+    return segments[-1] == "token"
 
 
 def is_sensitive_key(key: str) -> bool:
     """Return whether a tool-argument key is too sensitive to store raw."""
 
     normalized = key.lower().replace("-", "_").replace(" ", "_")
-    return any(part in normalized for part in SENSITIVE_KEY_PARTS)
+    if any(part in normalized for part in SENSITIVE_KEY_PARTS):
+        return True
+    return _has_sensitive_token_segment(normalized)
 
 
 def hash_sensitive_value(value: Any, salt: str = "agentsentinel") -> str:

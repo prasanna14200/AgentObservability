@@ -47,6 +47,32 @@ def test_collector_captures_phase2_traces_and_rejects_malformed_input(tmp_path: 
     assert "sha256:" in rejection_text
 
 
+def test_collector_redacts_bare_token_fields_in_rejection_log(tmp_path: Path) -> None:
+    """Regression test: a malformed payload carrying a bare 'token' (or
+    'session_token') field must not reach data/collected/rejected/rejections.jsonl
+    unredacted. Prior to the Phase 4 patch, SENSITIVE_KEY_PARTS only matched
+    access_token/auth_token/refresh_token, so this leaked raw to disk."""
+
+    collector = TraceCollector(sink_root=tmp_path / "collected")
+    malformed = {
+        "trace_id": "trace-token-regression",
+        "token": "RAW-BARE-TOKEN-SECRET",
+        "session_token": "RAW-SESSION-TOKEN-SECRET",
+        # deliberately missing required fields -> fails validation -> rejection path
+    }
+
+    rejected = collector.capture(malformed)
+
+    assert rejected is None
+    assert collector.rejections
+    rejection_sink = tmp_path / "collected" / "rejected" / "rejections.jsonl"
+    rejection_text = rejection_sink.read_text(encoding="utf-8")
+    assert "RAW-BARE-TOKEN-SECRET" not in rejection_text
+    assert "RAW-SESSION-TOKEN-SECRET" not in rejection_text
+    assert "trace-token-regression" in rejection_text
+    assert "sha256:" in rejection_text
+
+
 def test_collector_default_sink_uses_collected_data_root() -> None:
     collector = TraceCollector()
 

@@ -59,6 +59,30 @@ def test_redaction_utility_is_deterministic_and_key_based() -> None:
     assert is_sensitive_key("customer_ref_hash") is False
 
 
+def test_redaction_catches_bare_and_compound_token_fields() -> None:
+    """Regression test for Phase 4 patch: prior SENSITIVE_KEY_PARTS only
+    matched the compound names access_token/auth_token/refresh_token, so a
+    field literally named 'token' (or other *_token variants) was written
+    to disk unredacted. See docs/phase4_completion.md."""
+
+    assert is_sensitive_key("token") is True
+    assert is_sensitive_key("Token") is True
+    assert is_sensitive_key("session_token") is True
+    assert is_sensitive_key("bearer_token") is True
+    assert is_sensitive_key("id_token") is True
+
+    clean, redacted = redact_mapping(
+        {"token": "raw-bare-token", "session_token": "raw-session-token", "safe": "value"}
+    )
+
+    assert redacted is True
+    assert clean["token"].startswith("sha256:")
+    assert clean["session_token"].startswith("sha256:")
+    assert clean["safe"] == "value"
+    assert "raw-bare-token" not in json.dumps(clean)
+    assert "raw-session-token" not in json.dumps(clean)
+
+
 def test_schema_does_not_define_raw_secret_fields() -> None:
     banned_names = {"api_key", "access_token", "password", "credential", "secret"}
     field_names = _collect_model_field_names(TraceRecord)

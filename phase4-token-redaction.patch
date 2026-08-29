@@ -1,0 +1,165 @@
+diff --git a/docs/phase4_completion.md b/docs/phase4_completion.md
+index d288336..1af25ff 100644
+--- a/docs/phase4_completion.md
++++ b/docs/phase4_completion.md
+@@ -81,6 +81,42 @@ Phase 4 is complete after the Phase 4-specific Git commit is made. Do not begin
+ - Database writes now: deferred to Phase 20.
+ - Raising validation exceptions to callers: avoided so the fake agent harness can continue safely during MVP tests.
+ 
++## Phase 4 Patch — Redaction Gap (found during pre-Phase-5 confirmation)
++
++**Found:** `SENSITIVE_KEY_PARTS` in `schema/redaction.py` only matched the
++compound names `access_token`, `auth_token`, `refresh_token` — not a bare
++`token` field, nor other `*_token` variants (`session_token`,
++`bearer_token`, `id_token`). Reproduced live: a malformed payload with a
++`token` field, sent through `TraceCollector.capture()`, wrote the raw
++secret value straight to `data/collected/rejected/rejections.jsonl`. The
++same gap applied to the accepted-trace path via
++`ToolArguments.redact_sensitive_values`, since both call `redact_mapping`.
++
++**Fix:** Replaced the blind-substring approach for token-shaped keys with a
++trailing-segment check (`is_sensitive_key` / `_has_sensitive_token_segment`
++in `schema/redaction.py`): a key is treated as a sensitive token field when
++`token` is the *last* `_`-separated segment (`token`, `access_token`,
++`session_token`, `bearer_token`, `id_token`, ...). This deliberately
++excludes metric-shaped keys where `token` is a *leading* segment followed
++by a metric suffix (`token_usage`, `token_count`) — those are legitimate
++`ResourceUsage` fields that Phase 6 needs as raw numbers, not secrets. An
++initial attempt at this fix used a plain `"token"` substring match, which
++over-matched `token_usage` and broke an existing passing test
++(`test_collector_captures_phase2_traces_and_rejects_malformed_input`); that
++regression is why the trailing-segment rule was used instead.
++
++**Verified:** `is_sensitive_key` checked against a truth table (`token`,
++`access_token`, `session_token`, `bearer_token`, `id_token` → sensitive;
++`token_usage`, `token_count` → not sensitive). New regression tests added:
++`test_redaction_catches_bare_and_compound_token_fields` (unit) and
++`test_collector_redacts_bare_token_fields_in_rejection_log` (integration,
++proves the rejection-log write path specifically). Full suite: 13 passed
++(11 prior + 2 new).
++
++**Scope:** This patch is committed separately from Phase 5 work, per the
++Phase 5 kickoff instructions. No Phase 3 schema changes were needed — only
++`schema/redaction.py` and its tests.
++
+ ## Interview-Grade Questions
+ 
+ 1. Why should the collector sanitize before schema materialization?
+diff --git a/src/agentsentinel/schema/redaction.py b/src/agentsentinel/schema/redaction.py
+index f6e1634..ba642a2 100644
+--- a/src/agentsentinel/schema/redaction.py
++++ b/src/agentsentinel/schema/redaction.py
+@@ -9,20 +9,37 @@ from typing import Any
+ SENSITIVE_KEY_PARTS = (
+     "api_key",
+     "apikey",
+-    "access_token",
+-    "auth_token",
+-    "refresh_token",
+     "password",
+     "credential",
+     "secret",
+ )
+ 
++# "token" is handled separately from SENSITIVE_KEY_PARTS, not folded into it
++# as a plain substring. A blind substring match on "token" would also catch
++# legitimate operational metrics like "token_usage"/"token_count" (see
++# ResourceUsage.token_usage in schema/trace.py), which are not secrets and
++# must remain raw for later phases (Phase 6 feature engineering needs the
++# actual numeric value). Credential-shaped token keys ("token",
++# "access_token", "session_token", "bearer_token", "id_token", ...) all have
++# "token" as the *trailing* "_"-separated segment; metric-shaped keys
++# ("token_usage", "token_count") have "token" as a *leading* segment
++# followed by a metric suffix. Matching on the trailing segment distinguishes
++# the two reliably. See Phase 4 patch note in docs/phase4_completion.md for
++# the leak (bare/compound token fields were unredacted) this closes.
++
++
++def _has_sensitive_token_segment(normalized: str) -> bool:
++    segments = normalized.split("_")
++    return segments[-1] == "token"
++
+ 
+ def is_sensitive_key(key: str) -> bool:
+     """Return whether a tool-argument key is too sensitive to store raw."""
+ 
+     normalized = key.lower().replace("-", "_").replace(" ", "_")
+-    return any(part in normalized for part in SENSITIVE_KEY_PARTS)
++    if any(part in normalized for part in SENSITIVE_KEY_PARTS):
++        return True
++    return _has_sensitive_token_segment(normalized)
+ 
+ 
+ def hash_sensitive_value(value: Any, salt: str = "agentsentinel") -> str:
+diff --git a/tests/integration/test_collector.py b/tests/integration/test_collector.py
+index c6eb171..c711116 100644
+--- a/tests/integration/test_collector.py
++++ b/tests/integration/test_collector.py
+@@ -47,6 +47,32 @@ def test_collector_captures_phase2_traces_and_rejects_malformed_input(tmp_path:
+     assert "sha256:" in rejection_text
+ 
+ 
++def test_collector_redacts_bare_token_fields_in_rejection_log(tmp_path: Path) -> None:
++    """Regression test: a malformed payload carrying a bare 'token' (or
++    'session_token') field must not reach data/collected/rejected/rejections.jsonl
++    unredacted. Prior to the Phase 4 patch, SENSITIVE_KEY_PARTS only matched
++    access_token/auth_token/refresh_token, so this leaked raw to disk."""
++
++    collector = TraceCollector(sink_root=tmp_path / "collected")
++    malformed = {
++        "trace_id": "trace-token-regression",
++        "token": "RAW-BARE-TOKEN-SECRET",
++        "session_token": "RAW-SESSION-TOKEN-SECRET",
++        # deliberately missing required fields -> fails validation -> rejection path
++    }
++
++    rejected = collector.capture(malformed)
++
++    assert rejected is None
++    assert collector.rejections
++    rejection_sink = tmp_path / "collected" / "rejected" / "rejections.jsonl"
++    rejection_text = rejection_sink.read_text(encoding="utf-8")
++    assert "RAW-BARE-TOKEN-SECRET" not in rejection_text
++    assert "RAW-SESSION-TOKEN-SECRET" not in rejection_text
++    assert "trace-token-regression" in rejection_text
++    assert "sha256:" in rejection_text
++
++
+ def test_collector_default_sink_uses_collected_data_root() -> None:
+     collector = TraceCollector()
+ 
+diff --git a/tests/unit/test_trace_schema.py b/tests/unit/test_trace_schema.py
+index 8946893..483a465 100644
+--- a/tests/unit/test_trace_schema.py
++++ b/tests/unit/test_trace_schema.py
+@@ -59,6 +59,30 @@ def test_redaction_utility_is_deterministic_and_key_based() -> None:
+     assert is_sensitive_key("customer_ref_hash") is False
+ 
+ 
++def test_redaction_catches_bare_and_compound_token_fields() -> None:
++    """Regression test for Phase 4 patch: prior SENSITIVE_KEY_PARTS only
++    matched the compound names access_token/auth_token/refresh_token, so a
++    field literally named 'token' (or other *_token variants) was written
++    to disk unredacted. See docs/phase4_completion.md."""
++
++    assert is_sensitive_key("token") is True
++    assert is_sensitive_key("Token") is True
++    assert is_sensitive_key("session_token") is True
++    assert is_sensitive_key("bearer_token") is True
++    assert is_sensitive_key("id_token") is True
++
++    clean, redacted = redact_mapping(
++        {"token": "raw-bare-token", "session_token": "raw-session-token", "safe": "value"}
++    )
++
++    assert redacted is True
++    assert clean["token"].startswith("sha256:")
++    assert clean["session_token"].startswith("sha256:")
++    assert clean["safe"] == "value"
++    assert "raw-bare-token" not in json.dumps(clean)
++    assert "raw-session-token" not in json.dumps(clean)
++
++
+ def test_schema_does_not_define_raw_secret_fields() -> None:
+     banned_names = {"api_key", "access_token", "password", "credential", "secret"}
+     field_names = _collect_model_field_names(TraceRecord)

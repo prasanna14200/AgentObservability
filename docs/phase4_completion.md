@@ -81,6 +81,42 @@ Phase 4 is complete after the Phase 4-specific Git commit is made. Do not begin 
 - Database writes now: deferred to Phase 20.
 - Raising validation exceptions to callers: avoided so the fake agent harness can continue safely during MVP tests.
 
+## Phase 4 Patch — Redaction Gap (found during pre-Phase-5 confirmation)
+
+**Found:** `SENSITIVE_KEY_PARTS` in `schema/redaction.py` only matched the
+compound names `access_token`, `auth_token`, `refresh_token` — not a bare
+`token` field, nor other `*_token` variants (`session_token`,
+`bearer_token`, `id_token`). Reproduced live: a malformed payload with a
+`token` field, sent through `TraceCollector.capture()`, wrote the raw
+secret value straight to `data/collected/rejected/rejections.jsonl`. The
+same gap applied to the accepted-trace path via
+`ToolArguments.redact_sensitive_values`, since both call `redact_mapping`.
+
+**Fix:** Replaced the blind-substring approach for token-shaped keys with a
+trailing-segment check (`is_sensitive_key` / `_has_sensitive_token_segment`
+in `schema/redaction.py`): a key is treated as a sensitive token field when
+`token` is the *last* `_`-separated segment (`token`, `access_token`,
+`session_token`, `bearer_token`, `id_token`, ...). This deliberately
+excludes metric-shaped keys where `token` is a *leading* segment followed
+by a metric suffix (`token_usage`, `token_count`) — those are legitimate
+`ResourceUsage` fields that Phase 6 needs as raw numbers, not secrets. An
+initial attempt at this fix used a plain `"token"` substring match, which
+over-matched `token_usage` and broke an existing passing test
+(`test_collector_captures_phase2_traces_and_rejects_malformed_input`); that
+regression is why the trailing-segment rule was used instead.
+
+**Verified:** `is_sensitive_key` checked against a truth table (`token`,
+`access_token`, `session_token`, `bearer_token`, `id_token` → sensitive;
+`token_usage`, `token_count` → not sensitive). New regression tests added:
+`test_redaction_catches_bare_and_compound_token_fields` (unit) and
+`test_collector_redacts_bare_token_fields_in_rejection_log` (integration,
+proves the rejection-log write path specifically). Full suite: 13 passed
+(11 prior + 2 new).
+
+**Scope:** This patch is committed separately from Phase 5 work, per the
+Phase 5 kickoff instructions. No Phase 3 schema changes were needed — only
+`schema/redaction.py` and its tests.
+
 ## Interview-Grade Questions
 
 1. Why should the collector sanitize before schema materialization?
