@@ -9,6 +9,7 @@ venv/
 !.env.example
 data/synthetic/
 data/collected/
+data/processed/
 *.db
 *.sqlite
 *.sqlite3

@@ -73,6 +73,77 @@ def test_collector_redacts_bare_token_fields_in_rejection_log(tmp_path: Path) ->
     assert "sha256:" in rejection_text
 
 
+def test_no_unredacted_secret_reaches_any_collected_jsonl(tmp_path: Path) -> None:
+    """Exhaustive proof: a payload carrying every secret-shaped field across
+    nested structures must not reach any data/collected/**/*.jsonl unredacted,
+    INCLUDING the rejection log. The collector sanitizes before validation, so
+    both accepted and rejected paths write only redacted values."""
+
+    collector = TraceCollector(sink_root=tmp_path / "collected")
+    raw_event = {
+        "trace_id": "trace-redaction-proof",
+        "dataset_version": "v1",
+        "data_type": "real",
+        "label": "normal",
+        "agent_id": "agent-001",
+        "task_id": "task-001",
+        "task_type": "order_lookup",
+        "events": [
+            {
+                "event_id": "evt-001",
+                "trace_id": "trace-redaction-proof",
+                "agent_id": "agent-001",
+                "task_id": "task-001",
+                "task_type": "order_lookup",
+                "timestamp": "2026-01-01T09:00:00+00:00",
+                "event_type": "tool_call",
+                "tool_name": "search_customer",
+                "tool_input_metadata": {
+                    "customer_ref_hash": "safe-value",
+                    "api_key": "RAW-API-KEY",
+                    "access_token": "RAW-ACCESS-TOKEN",
+                    "password": "RAW-PASSWORD",
+                    "secret": "RAW-SECRET",
+                    "credential": "RAW-CREDENTIAL",
+                    "token": "RAW-BARE-TOKEN",
+                    "session_token": "RAW-SESSION-TOKEN",
+                    "nested": {
+                        "apikey": "RAW-APIKEY-NESTED",
+                        "bearer_token": "RAW-BEARER-TOKEN",
+                    },
+                    "list_of_dicts": [
+                        {"id_token": "RAW-ID-TOKEN"},
+                    ],
+                },
+                "tool_output_metadata": {"record_count": 1, "result_size_bytes": 500},
+                "latency_ms": 120,
+                "status": "success",
+                "retry_count": 0,
+                "token_usage": 100,
+                "estimated_cost_usd": 0.0002,
+                "permissions": ["orders:read"],
+            }
+        ],
+    }
+
+    result = collector.capture(raw_event)
+
+    all_files = list((tmp_path / "collected").rglob("*.jsonl"))
+    all_text = "".join(path.read_text(encoding="utf-8") for path in all_files)
+
+    assert "RAW-API-KEY" not in all_text
+    assert "RAW-ACCESS-TOKEN" not in all_text
+    assert "RAW-PASSWORD" not in all_text
+    assert "RAW-SECRET" not in all_text
+    assert "RAW-CREDENTIAL" not in all_text
+    assert "RAW-BARE-TOKEN" not in all_text
+    assert "RAW-SESSION-TOKEN" not in all_text
+    assert "RAW-APIKEY-NESTED" not in all_text
+    assert "RAW-BEARER-TOKEN" not in all_text
+    assert "RAW-ID-TOKEN" not in all_text
+    assert "safe-value" in all_text
+
+
 def test_collector_default_sink_uses_collected_data_root() -> None:
     collector = TraceCollector()
 

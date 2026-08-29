@@ -48,3 +48,30 @@ What is deferred:
 - Fail-open/fail-closed behavior is deferred to the policy and runtime phases.
 - OpenTelemetry abstraction is deferred to Phase 14.
 - Model, telemetry, and service outage behavior is deferred to Phase 15.
+
+## Phase 5 — Preprocessing
+
+`TraceCollector` sanitizes input before schema validation, so both accepted and rejected paths write only redacted values. Rejection payloads are extracted from `data/collected/rejected/rejections.jsonl` during preprocessing and included with `source="collected"`.
+
+Preprocessing loads both synthetic (`data/synthetic/`) and collected (`data/collected/`) JSONL into a single DataFrame, with a `source` column preserving provenance. It does NOT perform feature engineering.
+
+Why preprocessing is separated from feature engineering:
+
+- Preprocessing normalizes units, parses timestamps, deduplicates, and flattens nested structures. Feature engineering computes derived behavior (e.g., calls per minute, error rates, latency deltas). Mixing them makes the pipeline harder to test, audit, and version independently.
+- Phase 6 can add new features without changing the cleaned base schema. Phase 5 can fix data-quality bugs without changing feature definitions.
+
+Null-handling choices:
+
+- `label` and `anomaly_type` are nullable in the schema. Real traces often have no label. Preprocessing fills missing values with `__UNKNOWN__` rather than dropping rows, because the absence of a label is informative (it tells Phase 6 to treat the row as unlabeled).
+- Numeric fields (`latency_ms`, `retry_count`, `token_usage`, `estimated_cost_usd`, `record_count`, `result_size_bytes`) are coerced with `pd.to_numeric(errors="coerce")`, producing `NaN` for unparseable values rather than crashing.
+
+Versioned output format:
+
+- Processed traces are written to `data/processed/<version>/traces.parquet`. Parquet preserves schema, compresses well, and loads fast in pandas for Phase 6/7. CSV is a human-readable fallback, but parquet avoids silent dtype drift.
+- A small `manifest.json` records input sources, row counts before/after dedup, null-handling decisions, schema version, and generation timestamp.
+
+What is deliberately left out:
+
+- No derived ratios or baselines; Phase 6 owns feature engineering.
+- No EDA plots/notebooks; Phase 7 consumes this phase's output.
+- No changes to Phase 3 schema or Phase 4 collector logic.
