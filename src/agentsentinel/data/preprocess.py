@@ -30,7 +30,6 @@ INPUT_PATHS = {
     "collected": [
         Path("data/collected/normal/traces.jsonl"),
         Path("data/collected/anomalous/traces.jsonl"),
-        Path("data/collected/rejected/rejections.jsonl"),
     ],
 }
 
@@ -47,42 +46,10 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _extract_sanitized_event(rejection: dict[str, Any]) -> dict[str, Any] | None:
-    payload = rejection.get("sanitized_event")
-    if isinstance(payload, dict):
-        return payload
-    return None
-
-
-def _flatten_trace(trace: dict[str, Any], source: str) -> dict[str, Any]:
-    events = trace.get("events", [])
-    if not events:
-        return {
-            "source": source,
-            "trace_id": trace.get("trace_id"),
-            "dataset_version": trace.get("dataset_version"),
-            "data_type": trace.get("data_type", source),
-            "limitations": trace.get("limitations"),
-            "label": trace.get("label") or NULL_LABEL_SENTINEL,
-            "anomaly_type": trace.get("anomaly_type") or NULL_LABEL_SENTINEL,
-            "agent_id": None,
-            "task_id": None,
-            "task_type": None,
-            "event_id": None,
-            "timestamp": None,
-            "event_type": None,
-            "tool_name": None,
-            "tool_input_metadata": None,
-            "tool_output_metadata": None,
-            "latency_ms": None,
-            "status": None,
-            "retry_count": None,
-            "token_usage": None,
-            "estimated_cost_usd": None,
-            "permissions": None,
-            "record_count": None,
-            "result_size_bytes": None,
-        }
+def _flatten_trace(trace: dict[str, Any], source: str) -> list[dict[str, Any]]:
+    events = trace.get("events")
+    if not isinstance(events, list) or not events:
+        return []
 
     rows: list[dict[str, Any]] = []
     for event in events:
@@ -141,14 +108,8 @@ def load_raw_traces() -> pd.DataFrame:
 
     for source, paths in INPUT_PATHS.items():
         for path in paths:
-            if source == "collected" and path.name == "rejections.jsonl":
-                for rejection in _load_jsonl(path):
-                    trace = _extract_sanitized_event(rejection)
-                    if trace is not None:
-                        rows.extend(_flatten_trace(trace, source))
-            else:
-                for trace in _load_jsonl(path):
-                    rows.extend(_flatten_trace(trace, source))
+            for trace in _load_jsonl(path):
+                rows.extend(_flatten_trace(trace, source))
 
     df = pd.DataFrame(rows)
     return df

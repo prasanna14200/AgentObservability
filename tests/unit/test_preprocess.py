@@ -178,7 +178,44 @@ def test_preprocess_writes_versioned_parquet_and_manifest(tmp_path: Path) -> Non
         preprocess_module.INPUT_PATHS = original_paths
 
 
-def test_rejection_log_payloads_are_included_as_collected_source(tmp_path: Path) -> None:
+def test_rejection_log_payloads_are_excluded_from_processed_dataset(tmp_path: Path) -> None:
+    """Rejected records must not enter the processed DataFrame. The rejection
+    log is an audit trail only; schema-invalid input should not pollute feature
+    baselines or the modeling dataset."""
+
+    normal_trace = {
+        "trace_id": "trace-normal-001",
+        "dataset_version": "v1",
+        "data_type": "synthetic",
+        "limitations": "synth",
+        "label": "normal",
+        "agent_id": "agent-1",
+        "task_id": "task-1",
+        "task_type": "order_lookup",
+        "events": [
+            {
+                "event_id": "evt-1",
+                "trace_id": "trace-normal-001",
+                "agent_id": "agent-1",
+                "task_id": "task-1",
+                "task_type": "order_lookup",
+                "timestamp": "2026-01-01T09:00:00+00:00",
+                "event_type": "tool_call",
+                "tool_name": "search_customer",
+                "tool_input_metadata": {},
+                "tool_output_metadata": {"record_count": 1, "result_size_bytes": 500},
+                "latency_ms": 100,
+                "status": "success",
+                "retry_count": 0,
+                "token_usage": 50,
+                "estimated_cost_usd": 0.0001,
+                "permissions": ["orders:read"],
+            }
+        ],
+    }
+    normal_path = tmp_path / "normal" / "traces.jsonl"
+    _write_jsonl(normal_path, [normal_trace])
+
     rejection = {
         "rejected_at": "2026-01-01T09:00:00+00:00",
         "reason": "validation error",
@@ -221,13 +258,12 @@ def test_rejection_log_payloads_are_included_as_collected_source(tmp_path: Path)
     original_paths = preprocess_module.INPUT_PATHS.copy()
     try:
         preprocess_module.INPUT_PATHS = {
-            "synthetic": [],
+            "synthetic": [normal_path],
             "collected": [rej_path],
         }
         df = load_raw_traces()
-        assert "source" in df.columns
-        assert "collected" in df["source"].values
         assert len(df) == 1
-        assert df.iloc[0]["trace_id"] == "trace-rej-001"
+        assert df.iloc[0]["trace_id"] == "trace-normal-001"
+        assert "trace-rej-001" not in df["trace_id"].values
     finally:
         preprocess_module.INPUT_PATHS = original_paths

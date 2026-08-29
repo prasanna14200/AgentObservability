@@ -75,3 +75,8 @@ What is deliberately left out:
 - No derived ratios or baselines; Phase 6 owns feature engineering.
 - No EDA plots/notebooks; Phase 7 consumes this phase's output.
 - No changes to Phase 3 schema or Phase 4 collector logic.
+
+Rejection-log exclusion:
+
+- `data/collected/rejected/rejections.jsonl` is an audit trail for malformed input. It is NOT loaded into `data/processed/v1/traces.parquet`. Schema-invalid records must not enter feature baselines or the modeling dataset.
+- `_flatten_trace` skips dicts without an `events` key, so even if a rejection file were accidentally pointed at by `INPUT_PATHS`, it would produce zero rows rather than placeholder rows.
