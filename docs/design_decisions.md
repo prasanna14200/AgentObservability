@@ -80,3 +80,26 @@ Rejection-log exclusion:
 
 - `data/collected/rejected/rejections.jsonl` is an audit trail for malformed input. It is NOT loaded into `data/processed/v1/traces.parquet`. Schema-invalid records must not enter feature baselines or the modeling dataset.
 - `_flatten_trace` skips dicts without an `events` key, so even if a rejection file were accidentally pointed at by `INPUT_PATHS`, it would produce zero rows rather than placeholder rows.
+
+## Phase 6 — Contextual Feature Engineering
+
+Features are computed relative to agent identity, task type, and in-trace trajectory. The same raw value (e.g., 100 tool calls, 500ms latency) produces different feature outputs under different contexts because baselines are scoped per agent and per task type.
+
+Why features are contextual rather than absolute:
+
+- Global thresholds misclassify: a 500ms call is normal for a slow agent but anomalous for a fast agent. A 100-tool-call trace is normal for `order_lookup` but abnormal for `delivery_status`.
+- Z-scores normalize each observation against its relevant distribution, making the feature matrix comparable across heterogeneous agents and tasks.
+- Permission matching is deterministic (boolean) because policy violations are not statistical anomalies — they feed both the rules engine and risk engine as hard flags.
+
+Baseline windowing/scoping choices:
+
+- Agent-level baselines use all events for that `agent_id` in the processed dataset. With a single agent in MVP 1, agent and global distributions are identical, but the code is structured to scale to multiple agents.
+- Task-type baselines use all events for that `task_type`.
+- Agent+task-type baselines use all events for the specific (`agent_id`, `task_type`) pair. This is the finest granularity and produces the most discriminating z-scores.
+- Trajectory features are computed per trace (position, cumulative calls, inter-call timing, tool repetition) and do not use cross-trace baselines.
+
+What is deferred:
+
+- Sequence-aware modeling (Phase 11) will use raw event sequences, not these aggregated contextual features.
+- Rules thresholds (Phase 8) and Isolation Forest (Phase 8) will consume this feature matrix but are not built here.
+- EDA notebooks (Phase 7) consume this phase's output.
