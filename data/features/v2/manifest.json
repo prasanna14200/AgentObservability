@@ -1,0 +1,68 @@
+{
+  "version": "v2",
+  "generated_at": "2026-08-30T02:04:15+00:00",
+  "input_source": "data/features/v1/features.parquet",
+  "pruning_decision": "Human-reviewed (2026-01-30). Dropped 4 agent-level baselines and calls_so_far. Kept 13 features.",
+  "features": [
+    {
+      "name": "agent_task_latency_zscore",
+      "baseline_scope": "agent+task-type-level"
+    },
+    {
+      "name": "agent_task_retry_zscore",
+      "baseline_scope": "agent+task-type-level"
+    },
+    {
+      "name": "agent_task_token_zscore",
+      "baseline_scope": "agent+task-type-level"
+    },
+    {
+      "name": "agent_task_cost_zscore",
+      "baseline_scope": "agent+task-type-level"
+    },
+    {
+      "name": "task_latency_zscore",
+      "baseline_scope": "task-type-level"
+    },
+    {
+      "name": "task_retry_zscore",
+      "baseline_scope": "task-type-level"
+    },
+    {
+      "name": "task_token_zscore",
+      "baseline_scope": "task-type-level"
+    },
+    {
+      "name": "task_cost_zscore",
+      "baseline_scope": "task-type-level"
+    },
+    {
+      "name": "call_position",
+      "baseline_scope": "trace-level"
+    },
+    {
+      "name": "time_since_last_call_ms",
+      "baseline_scope": "trace-level"
+    },
+    {
+      "name": "tool_repeat_in_session",
+      "baseline_scope": "trace-level"
+    },
+    {
+      "name": "permission_match",
+      "baseline_scope": "deterministic"
+    },
+    {
+      "name": "trace_event_count",
+      "baseline_scope": "trace-level"
+    }
+  ],
+  "row_count": 1823,
+  "dropped_features": [
+    "agent_latency_zscore (agent-level baseline \u2014 MVP 1 placeholder)",
+    "agent_retry_zscore (agent-level baseline \u2014 MVP 1 placeholder)",
+    "agent_token_zscore (agent-level baseline \u2014 MVP 1 placeholder)",
+    "agent_cost_zscore (agent-level baseline \u2014 MVP 1 placeholder)",
+    "calls_so_far (perfectly correlated with call_position)"
+  ]
+}

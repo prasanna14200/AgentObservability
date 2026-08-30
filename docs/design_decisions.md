@@ -117,5 +117,6 @@ Key findings:
 
 Implications for Phase 8:
 
-- Feature pruning is needed before Isolation Forest. Recommended: keep `agent_task_*` z-scores (finest baseline) and drop `agent_*` and `task_*` z-scores; keep `call_position` OR `calls_so_far` (not both); keep `agent_token_zscore` OR `agent_cost_zscore` (not both).
-- Pre-registering Gate C should account for per-category evaluation, not just a single "anomalous" bucket.
+- **Feature pruning decision:** The 18-engineered-feature set has been pruned to exactly 13 features for Phase 8 modeling. Dropped: all 4 agent-level baselines (`agent_latency_zscore`, `agent_retry_zscore`, `agent_token_zscore`, `agent_cost_zscore`) and `calls_so_far` (perfectly correlated with `call_position`).
+- **Agent-level baseline limitation (stated, not bug):** The agent-level features (`agent_*_zscore`) are a placeholder for Deliverable 3+ multi-agent data. Under MVP 1's single-agent scope, they cannot demonstrate cross-agent contextuality — there is no second agent to contrast against. They are redundant with the finer-grained agent+task-type and task-type baselines in this dataset. A hiring panel should understand that these features exist in the schema/design to support the eventual multi-agent case, but are not meaningfully exercised by MVP 1's single-agent data.
+- **Gate C pre-registered:** See `docs/gate_c_preregistration.md` for the pre-registered target metric (PR-AUC primary, F1 secondary) and FP ceiling (<= 10%). This was committed before any Isolation Forest training.

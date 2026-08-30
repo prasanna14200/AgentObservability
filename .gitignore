@@ -11,6 +11,7 @@ data/synthetic/
 data/collected/
 data/processed/
 data/features/
+!data/features/v2/
 *.db
 *.sqlite
 *.sqlite3
