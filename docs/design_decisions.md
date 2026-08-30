@@ -103,3 +103,19 @@ What is deferred:
 - Sequence-aware modeling (Phase 11) will use raw event sequences, not these aggregated contextual features.
 - Rules thresholds (Phase 8) and Isolation Forest (Phase 8) will consume this feature matrix but are not built here.
 - EDA notebooks (Phase 7) consume this phase's output.
+
+## Phase 7 — Exploratory Data Analysis
+
+`notebooks/01_eda.ipynb` explores the Phase 6 feature matrix using only the 18 engineered features as the numeric feature set. Raw/passthrough columns are used for context and grouping only.
+
+Key findings:
+
+- **Class balance:** 1206 normal (66.2%), 617 anomalous (33.8%). All three anomaly types have >= 97 examples. `resource_spike` is the smallest at 97 — sufficient for detection but tight for per-category evaluation.
+- **Feature redundancy:** 24 near-duplicate pairs flagged (|r| > 0.85). This is expected with a single-agent dataset: agent-level, task-type-level, and agent+task-type-level baselines collapse to nearly identical values. Additionally, `agent_token_zscore` and `agent_cost_zscore` are perfectly correlated (r=1.0) because cost is a linear function of token usage, and `call_position`/`calls_so_far` are perfectly correlated because both are cumulative event counters.
+- **Label leakage:** None detected — `label` and `anomaly_type` are not referenced in `contextual.py`.
+- **Per-anomaly separation:** `retry_storm` has distinctly higher `retry_count`-derived z-scores; `resource_spike` has higher `token_usage`/`cost` z-scores. A single "anomalous" bucket would lose this structure.
+
+Implications for Phase 8:
+
+- Feature pruning is needed before Isolation Forest. Recommended: keep `agent_task_*` z-scores (finest baseline) and drop `agent_*` and `task_*` z-scores; keep `call_position` OR `calls_so_far` (not both); keep `agent_token_zscore` OR `agent_cost_zscore` (not both).
+- Pre-registering Gate C should account for per-category evaluation, not just a single "anomalous" bucket.
