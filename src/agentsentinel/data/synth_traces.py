@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-DATASET_VERSION = "synthetic-mvp1-v1"
+DATASET_VERSION = "synthetic-mvp1-v2"
 DEFAULT_SEED = 20260818
 TOOLS = ("search_customer", "get_order", "update_order")
 LIMITATIONS = (
@@ -29,7 +29,13 @@ def generate_dataset(
     anomalous_count: int = 120,
     seed: int = DEFAULT_SEED,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """Return deterministic normal traces, anomalous traces, and metadata."""
+    """Return deterministic normal traces, anomalous traces, and metadata.
+
+    Trace start timestamps are interleaved across normal and anomalous traces
+    by shuffling each class independently and then interleaving in round-robin
+    fashion. This prevents the temporal split from trivially separating classes
+    by generation batch while maintaining determinism.
+    """
 
     if normal_count < 0 or anomalous_count < 0:
         raise ValueError("trace counts must be non-negative")
@@ -37,24 +43,32 @@ def generate_dataset(
     rng = random.Random(seed)
     base_time = datetime(2026, 1, 1, 9, 0, tzinfo=timezone.utc)
 
-    normal = [
-        _normal_trace(rng, trace_index=i, base_time=base_time)
-        for i in range(normal_count)
-    ]
+    normal_indices = list(range(normal_count))
+    anomalous_indices = list(range(normal_count, normal_count + anomalous_count))
+    rng.shuffle(normal_indices)
+    rng.shuffle(anomalous_indices)
 
-    anomaly_types = ("tool_loop", "retry_storm", "resource_spike")
-    anomalous: list[dict[str, Any]] = []
-    for i in range(anomalous_count):
-        anomaly_type = anomaly_types[i % len(anomaly_types)]
-        trace_index = normal_count + i
-        anomalous.append(
-            _anomalous_trace(
-                rng,
-                trace_index=trace_index,
-                base_time=base_time,
-                anomaly_type=anomaly_type,
-            )
-        )
+    max_len = max(len(normal_indices), len(anomalous_indices))
+    interleaved_indices = []
+    for i in range(max_len):
+        if i < len(normal_indices):
+            interleaved_indices.append(("normal", None, normal_indices[i]))
+        if i < len(anomalous_indices):
+            anomaly_types = ("tool_loop", "retry_storm", "resource_spike")
+            anomaly_type = anomaly_types[(anomalous_indices[i] - normal_count) % len(anomaly_types)]
+            interleaved_indices.append(("anomalous", anomaly_type, anomalous_indices[i]))
+
+    normal_traces = []
+    anomalous_traces = []
+    for shuffled_index, (label, anomaly_type, trace_index) in enumerate(interleaved_indices):
+        start = base_time + timedelta(minutes=shuffled_index * 3)
+        if label == "normal":
+            normal_traces.append(_normal_trace(rng, trace_index, base_time, start_override=start))
+        else:
+            anomalous_traces.append(_anomalous_trace(rng, trace_index, base_time, anomaly_type, start_override=start))
+
+    normal_traces.sort(key=lambda trace: int(trace["trace_id"].split("-")[1]))
+    anomalous_traces.sort(key=lambda trace: int(trace["trace_id"].split("-")[1]))
 
     metadata = {
         "dataset_version": DATASET_VERSION,
@@ -62,11 +76,11 @@ def generate_dataset(
         "seed": seed,
         "normal_count": normal_count,
         "anomalous_count": anomalous_count,
-        "anomaly_types": list(anomaly_types),
+        "anomaly_types": ["tool_loop", "retry_storm", "resource_spike"],
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "limitations": LIMITATIONS,
     }
-    return normal, anomalous, metadata
+    return normal_traces, anomalous_traces, metadata
 
 
 def write_dataset(
@@ -98,11 +112,12 @@ def _normal_trace(
     rng: random.Random,
     trace_index: int,
     base_time: datetime,
+    start_override: datetime | None = None,
 ) -> dict[str, Any]:
     task_type = rng.choice(("order_lookup", "address_change", "delivery_status"))
     agent_id = "support-agent-001"
     task_id = f"task-{trace_index:06d}"
-    start = base_time + timedelta(minutes=trace_index * 3)
+    start = start_override if start_override is not None else base_time + timedelta(minutes=trace_index * 3)
     tool_sequence = _normal_tool_sequence(rng, task_type)
     events = [
         _event(
@@ -129,11 +144,12 @@ def _anomalous_trace(
     trace_index: int,
     base_time: datetime,
     anomaly_type: str,
+    start_override: datetime | None = None,
 ) -> dict[str, Any]:
     task_type = rng.choice(("order_lookup", "address_change", "delivery_status"))
     agent_id = "support-agent-001"
     task_id = f"task-{trace_index:06d}"
-    start = base_time + timedelta(minutes=trace_index * 3)
+    start = start_override if start_override is not None else base_time + timedelta(minutes=trace_index * 3)
 
     if anomaly_type == "tool_loop":
         tool_sequence = ["search_customer", "get_order"] * 4

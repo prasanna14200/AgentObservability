@@ -2,7 +2,7 @@
 
 DATA TYPE: SYNTHETIC
 
-Dataset version: synthetic-mvp1-v1
+Dataset version: synthetic-mvp1-v2
 Seed: 20260818
 Normal traces: 500
 Anomalous traces: 120

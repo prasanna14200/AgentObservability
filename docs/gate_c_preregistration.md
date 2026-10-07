@@ -11,7 +11,7 @@ F1 at a fixed operating threshold (secondary, reported for interpretability but 
 Anomaly prevalence is ~19% at trace level (120/620) and ~34% at event level (617/1823). PR-AUC is robust to this imbalance where accuracy would be misleading. The FP ceiling reflects that false alerts erode operator trust in a safety system regardless of training outcome.
 
 ## Split Protocol
-Temporal split by timestamp: earliest 80% of traces by start time = train, latest 20% = test. Cutoff timestamp: 2026-01-02T09:48:00+00:00. Train: 496 traces (all normal). Test: 124 traces (120 anomalous, 4 normal). No trace_id appears in both splits.
+Temporal split by timestamp: earliest 80% of traces by start time = train, latest 20% = test. Cutoff timestamp: 2026-01-02T09:48:00+00:00. Train: 496 traces (97 anomalous, 399 normal). Test: 124 traces (23 anomalous, 101 normal). No trace_id appears in both splits. Note: an earlier Phase 2 data-generation bug caused all normal traces to precede all anomalous traces in timestamp, making the original split trivially class-separated. The bug was fixed by interleaving timestamps; this split uses the corrected data (synthetic-mvp1-v2).
 
 ## Feature Set
 13 features (pruned from 18):
@@ -23,7 +23,7 @@ Dropped: all 4 agent-level baselines (agent_*_zscore) and calls_so_far (perfectl
 
 ## Reproducibility
 - Random seed: 42 (scikit-learn IsolationForest)
-- Dataset version: data/features/v2/features.parquet
+- Dataset version: data/features/v3/features.parquet (synthetic-mvp1-v2)
 - scikit-learn version: recorded at training time
 - Hardware: recorded at training time
 

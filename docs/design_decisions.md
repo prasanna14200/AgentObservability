@@ -120,3 +120,29 @@ Implications for Phase 8:
 - **Feature pruning decision:** The 18-engineered-feature set has been pruned to exactly 13 features for Phase 8 modeling. Dropped: all 4 agent-level baselines (`agent_latency_zscore`, `agent_retry_zscore`, `agent_token_zscore`, `agent_cost_zscore`) and `calls_so_far` (perfectly correlated with `call_position`).
 - **Agent-level baseline limitation (stated, not bug):** The agent-level features (`agent_*_zscore`) are a placeholder for Deliverable 3+ multi-agent data. Under MVP 1's single-agent scope, they cannot demonstrate cross-agent contextuality — there is no second agent to contrast against. They are redundant with the finer-grained agent+task-type and task-type baselines in this dataset. A hiring panel should understand that these features exist in the schema/design to support the eventual multi-agent case, but are not meaningfully exercised by MVP 1's single-agent data.
 - **Gate C pre-registered:** See `docs/gate_c_preregistration.md` for the pre-registered target metric (PR-AUC primary, F1 secondary) and FP ceiling (<= 10%). This was committed before any Isolation Forest training.
+
+## Phase 2 Bug Fix — Temporal Split Artifact (2026-01-30)
+
+**What the bug was:** Phase 2's synthetic trace generator (`src/agentsentinel/data/synth_traces.py`) generated all 500 normal traces first, then all 120 anomalous traces. Both groups computed `start = base_time + timedelta(minutes=trace_index * 3)`, so normal traces got trace_index 0-499 and anomalous traces got trace_index 500-619. Result: all normal traces had earlier timestamps than all anomalous traces — there was zero temporal overlap between classes.
+
+**Why it happened:** Class-batched generation with sequential `trace_index` assignment. The generator iterated `for i in range(normal_count)` then `for i in range(anomalous_count)`, appending to separate lists. Timestamps were derived from the loop index, not from a shuffled global order.
+
+**Impact on Phase 8:** When a temporal split (80/20 by timestamp) was applied, the first 80% of traces were ALL normal (496 traces, 0 anomalous), and the last 20% were ALL anomalous (120 anomalous, 4 normal). This made the split trivial: the model learned "everything before cutoff is normal, everything after is anomalous." The resulting FPR calculation was meaningless (6 normal events out of 9 total normal test events → 66.7% FPR, not a real model failure).
+
+**The fix:** Regenerated Phase 2 synthetic data (dataset version `synthetic-mvp1-v2`) with interleaved timestamps. The generator now:
+1. Creates all 620 trace assignments (type, anomaly_type) first
+2. Shuffles each class independently using the fixed seed
+3. Interleaves in round-robin fashion: normal[0], anomalous[0], normal[1], anomalous[1], etc.
+4. Assigns `start = base_time + timedelta(minutes=shuffled_index * 3)` in this interleaved order
+
+This preserves determinism (same seed → same interleaving every run) and keeps internal event timing within traces untouched. Only trace-level start-time ordering changes.
+
+**Version mapping:**
+- `data/synthetic/` → v2 (`synthetic-mvp1-v2`) — **current**
+- `data/processed/v2/` → derived from synthetic v2 — **current**
+- `data/features/v3/` → derived from processed v2 — **current**
+- `data/processed/v1/`, `data/features/v1/`, `data/features/v2/` → **deprecated**, derived from old synthetic v1 with the timestamp bug
+
+**Invalidated Phase 8 results:** The earlier Phase 8 report (PR-AUC 0.967/0.991, FPR 66.7%/0%, naive-pooled-hypothesis finding) was based on the buggy temporal split and is INVALIDATED. The corrected Phase 8 evaluation using the interleaved data reports: PR-AUC 0.195 (IF) / 0.574 (rules), FPR 61.8% (IF) / 0.0% (rules), Gate C FAIL. See `notebooks/02_classical_ml.ipynb` and `models/model_cards/` for the corrected results.
+
+**Lesson for hiring panel:** This is an example of why data-generation artifacts can silently invalidate downstream evaluation. The split looked reasonable on the surface (80/20, temporal ordering preserved) but the data-generation order created a perfect class-separating artifact. Catching this required inspecting the generator code, not just the split logic.

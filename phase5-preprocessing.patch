@@ -1,0 +1,971 @@
+diff --git a/.gitignore b/.gitignore
+index aa7be21..69192ee 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,6 +9,7 @@ venv/
+ !.env.example
+ data/synthetic/
+ data/collected/
++data/processed/
+ *.db
+ *.sqlite
+ *.sqlite3
+diff --git a/docs/design_decisions.md b/docs/design_decisions.md
+index e423a59..8830fe0 100644
+--- a/docs/design_decisions.md
++++ b/docs/design_decisions.md
+@@ -42,9 +42,103 @@ Malformed-input policy:
+ - A sanitized copy of the payload and the validation reason are written to `data/collected/rejected/rejections.jsonl`.
+ - Partial acceptance is deliberately avoided because later audit replay must not depend on half-valid records.
+ 
+-What is deferred:
++## Phase 5 — Preprocessing
++
++`src/agentsentinel/data/preprocess.py` loads Phase 2 synthetic traces
++(`data/synthetic/`) and Phase 4 collected traces (`data/collected/`),
++flattens each trace's nested events into one row per event, and writes a
++versioned Parquet table plus a manifest under `data/processed/<version>/`.
++
++Why preprocessing is separate from feature engineering:
++
++- Phase 5 only cleans and reshapes what the Phase 3 schema already
++  captures: nested fields to flat columns, timestamp parsing, type
++  coercion, and deduplication. It does not compute anything derived
++  (rates, ratios, rolling windows, baselines) -- that is Phase 6.
++  Mixing the two would make it impossible to re-run feature engineering
++  against a differently-shaped feature set without also re-deciding
++  cleaning/typing rules, and would make Phase 5's output harder to trust
++  as a stable contract for both Phase 6 and Phase 7.
++- Row granularity is one row per tool-call event, with trace-level fields
++  (trace_id, label, anomaly_type, data_type, agent_id, task_id, task_type,
++  dataset_version, limitations, policy_version) repeated onto every event
++  row belonging to that trace. Per-event operational fields (latency_ms,
++  token_usage, retry_count, status) are what Phase 6/7 need directly; a
++  nested list-of-events column would just force every downstream consumer
++  to re-flatten it.
++- Tool arguments (`tool_input_metadata`) are kept as a JSON string column,
++  not expanded into per-key columns. Argument shape varies by tool_name
++  (search_customer/get_order/update_order each have different keys), so a
++  fixed set of flat columns cannot represent them without inventing a
++  per-tool schema -- that belongs to Phase 6, not Phase 5.
++
++Provenance: a `source` column records which pipeline produced each row
++(`"synthetic"` vs `"collected"`), independent of the trace's own
++`data_type` field (`"synthetic"`/`"real"`). The two are never merged or
++derived from one another -- a real production trace captured by the Phase 4
++collector still has `source="collected"`, `data_type="real"`, and that
++combination is itself useful signal, per the "do not silently merge
++dataset types" rule.
++
++Null-handling choices:
++
++- `label` (null on real/unlabeled traces) -> sentinel `"unlabeled"`.
++- `anomaly_type` (null on normal/unlabeled traces) -> sentinel `"none"`.
++- `policy_version` (null until the policy engine phase exists) -> sentinel
++  `"unassigned"`.
++- Rows are never dropped for a missing label/anomaly_type/policy_version.
++  An unlabeled real trace is still a valid row for Phase 6/7 -- it just
++  cannot be used as a supervised-learning label. Explicit string sentinels
++  were used instead of leaving `None`/`NaN` so that groupby/value_counts/
++  one-hot operations in later phases see one consistent dtype per column
++  instead of a silent mix of `str` and `float('nan')`.
++
++Type coercion: `retry_count`, `latency_ms`, `token_usage`,
++`output_record_count`, and `output_result_size_bytes` are coerced to
++pandas' nullable `Int64` (not numpy `int64`, which has no way to represent
++a missing value); `estimated_cost_usd` to `float64`; `event_timestamp` is
++parsed from the raw ISO string to a UTC-aware `datetime64` column (the raw
++string column is dropped once parsed, to avoid two representations of the
++same fact).
++
++Deduplication: rows are deduplicated by the composite key
++`(trace_id, event_id)`, not `event_id` alone. Per the Phase 3 schema,
++`event_id` should already be globally unique, but the composite costs
++nothing extra and does not rely on that uniqueness assumption holding
++against real (not just synthetic) collected data, which Phase 5 has not
++yet been exercised against at volume.
++
++Rejection-log exclusion: `data/collected/rejected/rejections.jsonl` is
++explicitly excluded from loading (`discover_trace_files` skips any path
++under a `rejected/` segment). That file holds malformed, non-Trace-shaped
++payloads written by `TraceCollector._reject()` -- it is diagnostic output
++about invalid input, not trace data, and must never be silently ingested
++as if it were.
++
++Versioned output format:
++
++- Parquet, not CSV, chosen because this dataset is read repeatedly by
++  Phase 6 and Phase 7, and Parquet preserves exact dtypes (nullable Int64,
++  UTC-aware datetime64, float64) round-trip; CSV would silently degrade
++  every one of those on load unless every consumer re-declares dtypes by
++  hand. The tradeoff is one added dependency, `pyarrow`, now declared in
++  `pyproject.toml` alongside a new `pandas` dependency (this project had no
++  DataFrame library before Phase 5).
++- Output path `data/processed/<version>/traces.parquet` plus
++  `data/processed/<version>/manifest.json`, mirroring the
++  `data/synthetic/`-style layout convention. `data/processed/` is
++  gitignored, matching `data/synthetic/` and `data/collected/`: it is
++  generated output, not source-controlled data.
++- The manifest records input sources (root paths, trace/event counts per
++  source), row counts before/after dedup, the null-handling sentinels and
++  reasons, the preprocessing schema version, and a generation timestamp --
++  everything needed to know how a given `data/processed/<version>/` was
++  produced without re-running the pipeline.
++
++What was deliberately left out:
++
++- No derived/behavioral features of any kind; Phase 6 owns feature
++  engineering.
++- No EDA plots or notebook; Phase 7 consumes this phase's output.
++- No changes to the Phase 3 schema or Phase 4 collector logic.
+ 
+-- Runtime interception and live request handling are deferred to Phase 13.
+-- Fail-open/fail-closed behavior is deferred to the policy and runtime phases.
+-- OpenTelemetry abstraction is deferred to Phase 14.
+-- Model, telemetry, and service outage behavior is deferred to Phase 15.
+diff --git a/docs/project_status.md b/docs/project_status.md
+index 16ba48c..c3115c4 100644
+--- a/docs/project_status.md
++++ b/docs/project_status.md
+@@ -10,9 +10,12 @@ Important invariant: anomaly signals are advisory. A deterministic policy engine
+ 
+ ## Current Phase
+ 
+-**Phase 4 — Instrumentation / Collection**
++**Phase 5 — Preprocessing**
+ 
+-Goal: build the local collector that validates, redacts, and records trace payloads without adding a live request path, policy engine, network service, or database.
++Goal: turn raw validated Trace records (Phase 2 synthetic + Phase 4
++collected) into a clean, flat, versioned table that Phase 6 (feature
++engineering) and Phase 7 (EDA) consume directly, without performing any
++feature engineering in this phase.
+ 
+ ## Locked Work
+ 
+@@ -28,17 +31,39 @@ Goal: build the local collector that validates, redacts, and records trace paylo
+ | Phase 2 — Synthetic trace generation | Complete | `src/agentsentinel/data/synth_traces.py`, `data/synthetic/normal/`, `data/synthetic/anomalous/`, Phase 2 tests |
+ | Phase 3 — Trace schema | Complete | `src/agentsentinel/schema/trace.py`, `src/agentsentinel/schema/redaction.py`, `tests/unit/test_trace_schema.py`, `docs/design_decisions.md` |
+ | Phase 4 — Instrumentation / collection | Complete | `src/agentsentinel/observability/collector.py`, `tests/integration/test_collector.py`, local JSONL sink under `data/collected/` |
++| Phase 5 — Preprocessing | Complete, pending your confirmation | `src/agentsentinel/data/preprocess.py`, `tests/unit/test_preprocess.py`, versioned output under `data/processed/<version>/` |
+ 
+ ## Latest Checkpoint
+ 
+-Phase 4 is complete.
++Phase 5 is complete, pending your review and confirmation before Phase 6.
+ 
+ Actual output:
+ 
+-- Git prerequisite completed with catch-up commit `be2ede6`.
+-- `TraceCollector` validates, redacts, and writes accepted traces to a local JSONL sink.
+-- Malformed inputs are rejected with documented reasons and sanitized rejection logs.
+-- Tests pass: 11 passed.
++- Phase 4 patch applied first (see `docs/phase4_completion.md`): a
++  token-key redaction gap was found and fixed before Phase 5 began, per
++  the redaction confirmation required at Phase 5 kickoff.
++- `src/agentsentinel/data/preprocess.py` loads Phase 2 synthetic + Phase 4
++  collected traces, flattens events to rows, applies null-handling
++  sentinels, coerces types, deduplicates by `(trace_id, event_id)`, and
++  writes `data/processed/<version>/traces.parquet` + `manifest.json`.
++- No feature engineering performed (spot-checked with a dedicated test).
++- Tests pass: 22 passed (13 prior + 9 new Phase 5 tests).
++- `pandas` and `pyarrow` added to `pyproject.toml`; `data/processed/` added
++  to `.gitignore`.
++
++## Phase 5 Checkpoint Criteria
++
++- [x] Redaction/rejection-log confirmation from Phase 4 resolved and reported.
++- [x] Preprocessing loads synthetic + collected traces with provenance
++      preserved as a `source` column.
++- [x] Missing/nullable field handling documented and tested.
++- [x] No feature engineering leaked into this phase (spot-checked against
++      Phase 6 scope).
++- [x] Versioned processed output + manifest written.
++- [x] Tests pass.
++- [x] `docs/design_decisions.md` updated.
++- [ ] Phase 5 commit made (separate from the Phase 4 patch commit) --
++      pending your review.
+ 
+ ## MVP 1 Scope
+ 
+diff --git a/phase4-token-redaction.patch b/phase4-token-redaction.patch
+deleted file mode 100644
+index 1840f72..0000000
+--- a/phase4-token-redaction.patch
++++ /dev/null
+@@ -1,165 +0,0 @@
+-diff --git a/docs/phase4_completion.md b/docs/phase4_completion.md
+-index d288336..1af25ff 100644
+---- a/docs/phase4_completion.md
+-+++ b/docs/phase4_completion.md
+-@@ -81,6 +81,42 @@ Phase 4 is complete after the Phase 4-specific Git commit is made. Do not begin
+- - Database writes now: deferred to Phase 20.
+- - Raising validation exceptions to callers: avoided so the fake agent harness can continue safely during MVP tests.
+- 
+-+## Phase 4 Patch — Redaction Gap (found during pre-Phase-5 confirmation)
+-+
+-+**Found:** `SENSITIVE_KEY_PARTS` in `schema/redaction.py` only matched the
+-+compound names `access_token`, `auth_token`, `refresh_token` — not a bare
+-+`token` field, nor other `*_token` variants (`session_token`,
+-+`bearer_token`, `id_token`). Reproduced live: a malformed payload with a
+-+`token` field, sent through `TraceCollector.capture()`, wrote the raw
+-+secret value straight to `data/collected/rejected/rejections.jsonl`. The
+-+same gap applied to the accepted-trace path via
+-+`ToolArguments.redact_sensitive_values`, since both call `redact_mapping`.
+-+
+-+**Fix:** Replaced the blind-substring approach for token-shaped keys with a
+-+trailing-segment check (`is_sensitive_key` / `_has_sensitive_token_segment`
+-+in `schema/redaction.py`): a key is treated as a sensitive token field when
+-+`token` is the *last* `_`-separated segment (`token`, `access_token`,
+-+`session_token`, `bearer_token`, `id_token`, ...). This deliberately
+-+excludes metric-shaped keys where `token` is a *leading* segment followed
+-+by a metric suffix (`token_usage`, `token_count`) — those are legitimate
+-+`ResourceUsage` fields that Phase 6 needs as raw numbers, not secrets. An
+-+initial attempt at this fix used a plain `"token"` substring match, which
+-+over-matched `token_usage` and broke an existing passing test
+-+(`test_collector_captures_phase2_traces_and_rejects_malformed_input`); that
+-+regression is why the trailing-segment rule was used instead.
+-+
+-+**Verified:** `is_sensitive_key` checked against a truth table (`token`,
+-+`access_token`, `session_token`, `bearer_token`, `id_token` → sensitive;
+-+`token_usage`, `token_count` → not sensitive). New regression tests added:
+-+`test_redaction_catches_bare_and_compound_token_fields` (unit) and
+-+`test_collector_redacts_bare_token_fields_in_rejection_log` (integration,
+-+proves the rejection-log write path specifically). Full suite: 13 passed
+-+(11 prior + 2 new).
+-+
+-+**Scope:** This patch is committed separately from Phase 5 work, per the
+-+Phase 5 kickoff instructions. No Phase 3 schema changes were needed — only
+-+`schema/redaction.py` and its tests.
+-+
+- ## Interview-Grade Questions
+- 
+- 1. Why should the collector sanitize before schema materialization?
+-diff --git a/src/agentsentinel/schema/redaction.py b/src/agentsentinel/schema/redaction.py
+-index f6e1634..ba642a2 100644
+---- a/src/agentsentinel/schema/redaction.py
+-+++ b/src/agentsentinel/schema/redaction.py
+-@@ -9,20 +9,37 @@ from typing import Any
+- SENSITIVE_KEY_PARTS = (
+-     "api_key",
+-     "apikey",
+--    "access_token",
+--    "auth_token",
+--    "refresh_token",
+-     "password",
+-     "credential",
+-     "secret",
+- )
+- 
+-+# "token" is handled separately from SENSITIVE_KEY_PARTS, not folded into it
+-+# as a plain substring. A blind substring match on "token" would also catch
+-+# legitimate operational metrics like "token_usage"/"token_count" (see
+-+# ResourceUsage.token_usage in schema/trace.py), which are not secrets and
+-+# must remain raw for later phases (Phase 6 feature engineering needs the
+-+# actual numeric value). Credential-shaped token keys ("token",
+-+# "access_token", "session_token", "bearer_token", "id_token", ...) all have
+-+# "token" as the *trailing* "_"-separated segment; metric-shaped keys
+-+# ("token_usage", "token_count") have "token" as a *leading* segment
+-+# followed by a metric suffix. Matching on the trailing segment distinguishes
+-+# the two reliably. See Phase 4 patch note in docs/phase4_completion.md for
+-+# the leak (bare/compound token fields were unredacted) this closes.
+-+
+-+
+-+def _has_sensitive_token_segment(normalized: str) -> bool:
+-+    segments = normalized.split("_")
+-+    return segments[-1] == "token"
+-+
+- 
+- def is_sensitive_key(key: str) -> bool:
+-     """Return whether a tool-argument key is too sensitive to store raw."""
+- 
+-     normalized = key.lower().replace("-", "_").replace(" ", "_")
+--    return any(part in normalized for part in SENSITIVE_KEY_PARTS)
+-+    if any(part in normalized for part in SENSITIVE_KEY_PARTS):
+-+        return True
+-+    return _has_sensitive_token_segment(normalized)
+- 
+- 
+- def hash_sensitive_value(value: Any, salt: str = "agentsentinel") -> str:
+-diff --git a/tests/integration/test_collector.py b/tests/integration/test_collector.py
+-index c6eb171..c711116 100644
+---- a/tests/integration/test_collector.py
+-+++ b/tests/integration/test_collector.py
+-@@ -47,6 +47,32 @@ def test_collector_captures_phase2_traces_and_rejects_malformed_input(tmp_path:
+-     assert "sha256:" in rejection_text
+- 
+- 
+-+def test_collector_redacts_bare_token_fields_in_rejection_log(tmp_path: Path) -> None:
+-+    """Regression test: a malformed payload carrying a bare 'token' (or
+-+    'session_token') field must not reach data/collected/rejected/rejections.jsonl
+-+    unredacted. Prior to the Phase 4 patch, SENSITIVE_KEY_PARTS only matched
+-+    access_token/auth_token/refresh_token, so this leaked raw to disk."""
+-+
+-+    collector = TraceCollector(sink_root=tmp_path / "collected")
+-+    malformed = {
+-+        "trace_id": "trace-token-regression",
+-+        "token": "RAW-BARE-TOKEN-SECRET",
+-+        "session_token": "RAW-SESSION-TOKEN-SECRET",
+-+        # deliberately missing required fields -> fails validation -> rejection path
+-+    }
+-+
+-+    rejected = collector.capture(malformed)
+-+
+-+    assert rejected is None
+-+    assert collector.rejections
+-+    rejection_sink = tmp_path / "collected" / "rejected" / "rejections.jsonl"
+-+    rejection_text = rejection_sink.read_text(encoding="utf-8")
+-+    assert "RAW-BARE-TOKEN-SECRET" not in rejection_text
+-+    assert "RAW-SESSION-TOKEN-SECRET" not in rejection_text
+-+    assert "trace-token-regression" in rejection_text
+-+    assert "sha256:" in rejection_text
+-+
+-+
+- def test_collector_default_sink_uses_collected_data_root() -> None:
+-     collector = TraceCollector()
+- 
+-diff --git a/tests/unit/test_trace_schema.py b/tests/unit/test_trace_schema.py
+-index 8946893..483a465 100644
+---- a/tests/unit/test_trace_schema.py
+-+++ b/tests/unit/test_trace_schema.py
+-@@ -59,6 +59,30 @@ def test_redaction_utility_is_deterministic_and_key_based() -> None:
+-     assert is_sensitive_key("customer_ref_hash") is False
+- 
+- 
+-+def test_redaction_catches_bare_and_compound_token_fields() -> None:
+-+    """Regression test for Phase 4 patch: prior SENSITIVE_KEY_PARTS only
+-+    matched the compound names access_token/auth_token/refresh_token, so a
+-+    field literally named 'token' (or other *_token variants) was written
+-+    to disk unredacted. See docs/phase4_completion.md."""
+-+
+-+    assert is_sensitive_key("token") is True
+-+    assert is_sensitive_key("Token") is True
+-+    assert is_sensitive_key("session_token") is True
+-+    assert is_sensitive_key("bearer_token") is True
+-+    assert is_sensitive_key("id_token") is True
+-+
+-+    clean, redacted = redact_mapping(
+-+        {"token": "raw-bare-token", "session_token": "raw-session-token", "safe": "value"}
+-+    )
+-+
+-+    assert redacted is True
+-+    assert clean["token"].startswith("sha256:")
+-+    assert clean["session_token"].startswith("sha256:")
+-+    assert clean["safe"] == "value"
+-+    assert "raw-bare-token" not in json.dumps(clean)
+-+    assert "raw-session-token" not in json.dumps(clean)
+-+
+-+
+- def test_schema_does_not_define_raw_secret_fields() -> None:
+-     banned_names = {"api_key", "access_token", "password", "credential", "secret"}
+-     field_names = _collect_model_field_names(TraceRecord)
+diff --git a/pyproject.toml b/pyproject.toml
+index 85a4e4c..1dd9fe1 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,6 +5,8 @@ description = "Runtime safety control plane experiments for AI agent tool calls.
+ requires-python = ">=3.11"
+ dependencies = [
+     "pydantic>=2.0",
++    "pandas>=2.0",
++    "pyarrow>=14.0",
+ ]
+ 
+ [project.optional-dependencies]
+diff --git a/src/agentsentinel/data/preprocess.py b/src/agentsentinel/data/preprocess.py
+new file mode 100644
+index 0000000..5e12b40
+--- /dev/null
++++ b/src/agentsentinel/data/preprocess.py
+@@ -0,0 +1,380 @@
++"""Phase 5 preprocessing: raw validated Trace JSONL -> analysis-ready table.
++
++This module loads Phase 2 synthetic traces (`data/synthetic/`) and Phase 4
++collected traces (`data/collected/`), flattens each trace's nested events
++into one row per event, and writes a versioned Parquet dataset plus a
++manifest under `data/processed/<version>/`.
++
++Explicitly out of scope (see docs/design_decisions.md):
++
++- No derived/behavioral features (rates, ratios, rolling windows, baselines).
++  That is Phase 6. If a column here looks like "calls per minute" or a
++  z-score, it does not belong in this module.
++- No EDA plots or notebook output. That is Phase 7.
++- No changes to the Phase 3 schema or Phase 4 collector logic.
++
++Row granularity: one row per tool-call *event*, not one row per trace. Trace-
++level fields (trace_id, label, anomaly_type, data_type, agent_id, task_id,
++task_type, dataset_version, limitations, policy_version) are repeated onto
++every event row belonging to that trace. This matches how Phase 6/7 will
++consume the data: per-event operational fields (latency_ms, token_usage,
++retry_count, status) are what feature engineering and EDA need directly, and
++a nested list-of-events column would just force every downstream consumer to
++re-flatten it themselves.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++from datetime import datetime, timezone
++from pathlib import Path
++from typing import Any
++
++import pandas as pd
++
++SCHEMA_VERSION = "phase5-preprocess-v1"
++
++# Directories/files that exist under data/collected/ but are NOT valid Trace
++# records and must never be loaded as trace data: the rejection log written
++# by TraceCollector._reject() for malformed input (see Phase 4 patch note in
++# docs/phase4_completion.md for why that log itself must stay sanitized).
++_EXCLUDED_PATH_SEGMENTS = {"rejected"}
++
++# Sentinel values for fields that are legitimately absent on real/unlabeled
++# traces (see TraceAuditMetadata in schema/trace.py: label, anomaly_type, and
++# policy_version are all nullable). We fill with explicit sentinels rather
++# than leaving NaN/None so that:
++#   (a) rows are never dropped for missing labels -- an unlabeled real trace
++#       is still a valid row for Phase 6/7, just not a supervised-learning
++#       label:
++#   (b) downstream groupby/value_counts/one-hot operations in Phase 6/7 see
++#       one consistent string dtype per column instead of a silent mix of
++#       str and float('nan').
++LABEL_SENTINEL = "unlabeled"
++ANOMALY_TYPE_SENTINEL = "none"
++POLICY_VERSION_SENTINEL = "unassigned"
++
++# Nullable pandas integer dtype: preserves NaN-safe integer semantics for
++# counts, since numpy int64 has no way to represent a missing value.
++_NULLABLE_INT_COLUMNS = (
++    "retry_count",
++    "latency_ms",
++    "token_usage",
++    "output_record_count",
++    "output_result_size_bytes",
++)
++_FLOAT_COLUMNS = ("estimated_cost_usd",)
++
++DEDUP_SUBSET = ("trace_id", "event_id")
++
++
++def discover_trace_files(root: Path) -> list[Path]:
++    """Return every traces.jsonl under root, excluding rejection logs.
++
++    Returns an empty list if root does not exist (e.g. data/collected/ has
++    never been written to on a fresh checkout, since it is gitignored).
++    """
++
++    if not root.exists():
++        return []
++
++    return sorted(
++        path
++        for path in root.rglob("traces.jsonl")
++        if not _EXCLUDED_PATH_SEGMENTS.intersection(path.parts)
++    )
++
++
++def load_raw_traces(paths: list[Path]) -> list[dict[str, Any]]:
++    """Load and JSON-parse every line of every given JSONL file."""
++
++    records: list[dict[str, Any]] = []
++    for path in paths:
++        with path.open("r", encoding="utf-8") as handle:
++            for line in handle:
++                line = line.strip()
++                if not line:
++                    continue
++                records.append(json.loads(line))
++    return records
++
++
++def flatten_trace(trace: dict[str, Any], source: str) -> list[dict[str, Any]]:
++    """Flatten one Phase2-shaped trace record into one row per event.
++
++    `source` records which pipeline produced this trace file (`"synthetic"`
++    from data/synthetic/, `"collected"` from data/collected/) -- this is
++    provenance about *how the record was loaded*, distinct from the trace's
++    own `data_type` field (`"synthetic"`/`"real"`), which is preserved
++    unchanged as its own column. The two can legitimately disagree (e.g. a
++    real production trace captured by the Phase 4 collector still has
++    `source="collected"`, `data_type="real"`), and that disagreement is
++    itself useful signal, so neither is derived from the other.
++    """
++
++    trace_fields = {
++        "source": source,
++        "trace_id": trace.get("trace_id"),
++        "dataset_version": trace.get("dataset_version"),
++        "data_type": trace.get("data_type"),
++        "limitations": trace.get("limitations"),
++        "label": trace.get("label"),
++        "anomaly_type": trace.get("anomaly_type"),
++        "policy_version": trace.get("policy_version"),
++        "agent_id": trace.get("agent_id"),
++        "task_id": trace.get("task_id"),
++        "task_type": trace.get("task_type"),
++    }
++
++    rows: list[dict[str, Any]] = []
++    for event in trace.get("events", []):
++        output_meta = event.get("tool_output_metadata") or {}
++        row = dict(trace_fields)
++        row.update(
++            {
++                "event_id": event.get("event_id"),
++                "event_timestamp_raw": event.get("timestamp"),
++                "event_type": event.get("event_type"),
++                "tool_name": event.get("tool_name"),
++                "status": event.get("status"),
++                "retry_count": event.get("retry_count"),
++                "latency_ms": event.get("latency_ms"),
++                "token_usage": event.get("token_usage"),
++                "estimated_cost_usd": event.get("estimated_cost_usd"),
++                "output_record_count": output_meta.get("record_count"),
++                "output_result_size_bytes": output_meta.get("result_size_bytes"),
++                "permissions": event.get("permissions"),
++                # Tool arguments are kept as a JSON string, not expanded into
++                # per-key columns: argument shape varies by tool_name
++                # (search_customer/get_order/update_order each have
++                # different keys), so a fixed set of flat columns cannot
++                # represent them without inventing per-tool schemas -- that
++                # design decision belongs to Phase 6 feature engineering,
++                # not Phase 5 preprocessing. Values are already redacted at
++                # schema/collector level (see schema/redaction.py); this is
++                # a pass-through, not a re-redaction.
++                "tool_input_metadata_json": json.dumps(
++                    event.get("tool_input_metadata"), sort_keys=True
++                ),
++            }
++        )
++        rows.append(row)
++    return rows
++
++
++def load_source(root: Path, source: str) -> tuple[list[dict[str, Any]], int]:
++    """Load and flatten all traces under root; return (rows, trace_count)."""
++
++    paths = discover_trace_files(root)
++    traces = load_raw_traces(paths)
++    rows: list[dict[str, Any]] = []
++    for trace in traces:
++        rows.extend(flatten_trace(trace, source=source))
++    return rows, len(traces)
++
++
++def _apply_null_handling(df: pd.DataFrame) -> pd.DataFrame:
++    df = df.copy()
++    df["label"] = df["label"].fillna(LABEL_SENTINEL)
++    df["anomaly_type"] = df["anomaly_type"].fillna(ANOMALY_TYPE_SENTINEL)
++    df["policy_version"] = df["policy_version"].fillna(POLICY_VERSION_SENTINEL)
++    return df
++
++
++def _parse_timestamps(df: pd.DataFrame) -> pd.DataFrame:
++    df = df.copy()
++    df["event_timestamp"] = pd.to_datetime(
++        df["event_timestamp_raw"], utc=True, errors="raise"
++    )
++    df = df.drop(columns=["event_timestamp_raw"])
++    return df
++
++
++def _coerce_types(df: pd.DataFrame) -> pd.DataFrame:
++    df = df.copy()
++    for column in _NULLABLE_INT_COLUMNS:
++        df[column] = pd.array(df[column], dtype="Int64")
++    for column in _FLOAT_COLUMNS:
++        df[column] = df[column].astype("float64")
++    return df
++
++
++def _deduplicate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
++    before = len(df)
++    df = df.drop_duplicates(subset=list(DEDUP_SUBSET), keep="first").reset_index(
++        drop=True
++    )
++    removed = before - len(df)
++    return df, removed
++
++
++def build_dataframe(
++    synthetic_dir: Path = Path("data/synthetic"),
++    collected_dir: Path = Path("data/collected"),
++) -> tuple[pd.DataFrame, dict[str, Any]]:
++    """Load, clean, and flatten synthetic + collected traces into one table.
++
++    Returns (dataframe, stats) where `stats` records everything the
++    manifest needs: input sources, row counts before/after dedup, and the
++    null-handling sentinels applied.
++    """
++
++    synthetic_rows, synthetic_trace_count = load_source(synthetic_dir, "synthetic")
++    collected_rows, collected_trace_count = load_source(collected_dir, "collected")
++    all_rows = synthetic_rows + collected_rows
++
++    columns = [
++        "source",
++        "trace_id",
++        "dataset_version",
++        "data_type",
++        "limitations",
++        "label",
++        "anomaly_type",
++        "policy_version",
++        "agent_id",
++        "task_id",
++        "task_type",
++        "event_id",
++        "event_timestamp_raw",
++        "event_type",
++        "tool_name",
++        "status",
++        "retry_count",
++        "latency_ms",
++        "token_usage",
++        "estimated_cost_usd",
++        "output_record_count",
++        "output_result_size_bytes",
++        "permissions",
++        "tool_input_metadata_json",
++    ]
++    df = pd.DataFrame(all_rows, columns=columns)
++
++    rows_before_dedup = len(df)
++    df = _apply_null_handling(df)
++    if not df.empty:
++        df = _parse_timestamps(df)
++    else:
++        df["event_timestamp"] = pd.Series(dtype="datetime64[ns, UTC]")
++        df = df.drop(columns=["event_timestamp_raw"])
++    df = _coerce_types(df)
++    df, duplicates_removed = _deduplicate(df)
++
++    stats = {
++        "input_sources": {
++            "synthetic": {
++                "root": str(synthetic_dir),
++                "trace_count": synthetic_trace_count,
++                "event_row_count": len(synthetic_rows),
++            },
++            "collected": {
++                "root": str(collected_dir),
++                "trace_count": collected_trace_count,
++                "event_row_count": len(collected_rows),
++            },
++        },
++        "row_count_before_dedup": rows_before_dedup,
++        "row_count_after_dedup": len(df),
++        "duplicate_rows_removed": duplicates_removed,
++        "dedup_subset": list(DEDUP_SUBSET),
++        "null_handling": {
++            "label": {
++                "sentinel": LABEL_SENTINEL,
++                "reason": "null on real/unlabeled traces; rows are kept, not dropped",
++            },
++            "anomaly_type": {
++                "sentinel": ANOMALY_TYPE_SENTINEL,
++                "reason": "null on normal or unlabeled traces; rows are kept, not dropped",
++            },
++            "policy_version": {
++                "sentinel": POLICY_VERSION_SENTINEL,
++                "reason": "policy engine (later phase) has not populated this yet",
++            },
++        },
++        "schema_version": SCHEMA_VERSION,
++    }
++    return df, stats
++
++
++def write_processed(
++    df: pd.DataFrame,
++    stats: dict[str, Any],
++    output_root: Path,
++    version: str,
++) -> tuple[Path, Path]:
++    """Write the versioned Parquet dataset and manifest.json.
++
++    Parquet was chosen over CSV: this dataset is read repeatedly by Phase 6
++    (feature engineering) and Phase 7 (EDA), and Parquet preserves exact
++    dtypes (nullable Int64, UTC-aware datetime64, float64) round-trip. CSV
++    would silently degrade every one of those on load unless every consumer
++    re-declares dtypes by hand -- a class of bug that surfaces only once a
++    later phase feeds a string into a numeric feature. The tradeoff is one
++    added dependency, `pyarrow`, declared in pyproject.toml.
++    """
++
++    output_dir = output_root / version
++    output_dir.mkdir(parents=True, exist_ok=True)
++
++    parquet_path = output_dir / "traces.parquet"
++    df.to_parquet(parquet_path, index=False)
++
++    manifest = {
++        "version": version,
++        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
++        **stats,
++    }
++    manifest_path = output_dir / "manifest.json"
++    manifest_path.write_text(
++        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
++    )
++
++    return parquet_path, manifest_path
++
++
++def run(
++    synthetic_dir: Path = Path("data/synthetic"),
++    collected_dir: Path = Path("data/collected"),
++    output_root: Path = Path("data/processed"),
++    version: str = "v1",
++) -> dict[str, Any]:
++    """End-to-end Phase 5 entry point: load -> clean -> write. Returns manifest dict."""
++
++    df, stats = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=collected_dir)
++    parquet_path, manifest_path = write_processed(
++        df, stats, output_root=output_root, version=version
++    )
++    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    manifest["_parquet_path"] = str(parquet_path)
++    manifest["_manifest_path"] = str(manifest_path)
++    return manifest
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--synthetic-dir", type=Path, default=Path("data/synthetic"))
++    parser.add_argument("--collected-dir", type=Path, default=Path("data/collected"))
++    parser.add_argument("--output-root", type=Path, default=Path("data/processed"))
++    parser.add_argument("--version", type=str, default="v1")
++    return parser.parse_args()
++
++
++def main() -> None:
++    args = parse_args()
++    manifest = run(
++        synthetic_dir=args.synthetic_dir,
++        collected_dir=args.collected_dir,
++        output_root=args.output_root,
++        version=args.version,
++    )
++    print(
++        f"Wrote {manifest['row_count_after_dedup']} rows "
++        f"({manifest['duplicate_rows_removed']} duplicates removed) to "
++        f"{manifest['_parquet_path']}"
++    )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/unit/test_preprocess.py b/tests/unit/test_preprocess.py
+new file mode 100644
+index 0000000..2b093ab
+--- /dev/null
++++ b/tests/unit/test_preprocess.py
+@@ -0,0 +1,206 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++import pandas as pd
++
++from agentsentinel.data.preprocess import (
++    ANOMALY_TYPE_SENTINEL,
++    LABEL_SENTINEL,
++    POLICY_VERSION_SENTINEL,
++    build_dataframe,
++    discover_trace_files,
++    run,
++)
++
++
++def _event(event_id: str, trace_id: str, **overrides: object) -> dict:
++    base = {
++        "event_id": event_id,
++        "trace_id": trace_id,
++        "agent_id": "agent-1",
++        "task_id": "task-1",
++        "timestamp": "2026-01-01T09:00:00+00:00",
++        "event_type": "tool_call",
++        "tool_name": "search_customer",
++        "tool_input_metadata": {"customer_ref_hash": "cust_hash_1"},
++        "tool_output_metadata": {"record_count": 1, "result_size_bytes": 300},
++        "latency_ms": 120,
++        "status": "success",
++        "retry_count": 0,
++        "token_usage": 100,
++        "estimated_cost_usd": 0.0002,
++        "permissions": ["orders:read"],
++        "task_type": "order_lookup",
++    }
++    base.update(overrides)
++    return base
++
++
++def _trace(trace_id: str, **overrides: object) -> dict:
++    base = {
++        "trace_id": trace_id,
++        "dataset_version": "test-v1",
++        "data_type": "synthetic",
++        "limitations": "test data",
++        "label": "normal",
++        "anomaly_type": None,
++        "agent_id": "agent-1",
++        "task_id": "task-1",
++        "task_type": "order_lookup",
++        "events": [_event(f"{trace_id}-event-00", trace_id)],
++    }
++    base.update(overrides)
++    return base
++
++
++def _write_jsonl(path: Path, rows: list[dict]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with path.open("w", encoding="utf-8") as handle:
++        for row in rows:
++            handle.write(json.dumps(row) + "\n")
++
++
++def test_missing_label_anomaly_type_and_policy_version_filled_with_sentinel(
++    tmp_path: Path,
++) -> None:
++    synthetic_dir = tmp_path / "synthetic"
++    trace = _trace("trace-real-1", data_type="real", label=None, anomaly_type=None)
++    trace["policy_version"] = None
++    _write_jsonl(synthetic_dir / "unlabeled" / "traces.jsonl", [trace])
++
++    df, _ = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=tmp_path / "missing")
++
++    assert len(df) == 1
++    assert df.loc[0, "label"] == LABEL_SENTINEL
++    assert df.loc[0, "anomaly_type"] == ANOMALY_TYPE_SENTINEL
++    assert df.loc[0, "policy_version"] == POLICY_VERSION_SENTINEL
++    assert not df["label"].isna().any()
++
++
++def test_rows_are_not_dropped_for_missing_label(tmp_path: Path) -> None:
++    synthetic_dir = tmp_path / "synthetic"
++    labeled = _trace("trace-labeled", label="anomalous", anomaly_type="tool_loop")
++    unlabeled = _trace("trace-unlabeled", label=None, anomaly_type=None)
++    _write_jsonl(synthetic_dir / "mixed" / "traces.jsonl", [labeled, unlabeled])
++
++    df, stats = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=tmp_path / "missing")
++
++    assert len(df) == 2
++    assert stats["row_count_after_dedup"] == 2
++
++
++def test_dedup_by_trace_and_event_id(tmp_path: Path) -> None:
++    synthetic_dir = tmp_path / "synthetic"
++    trace = _trace("trace-dup")
++    # Same trace/event written twice across two files, simulating an
++    # overlapping export or a re-run that appended the same rows again.
++    _write_jsonl(synthetic_dir / "a" / "traces.jsonl", [trace])
++    _write_jsonl(synthetic_dir / "b" / "traces.jsonl", [trace])
++
++    df, stats = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=tmp_path / "missing")
++
++    assert stats["row_count_before_dedup"] == 2
++    assert stats["row_count_after_dedup"] == 1
++    assert stats["duplicate_rows_removed"] == 1
++    assert len(df) == 1
++
++
++def test_type_coercion_for_numeric_fields(tmp_path: Path) -> None:
++    synthetic_dir = tmp_path / "synthetic"
++    trace = _trace("trace-types")
++    _write_jsonl(synthetic_dir / "a" / "traces.jsonl", [trace])
++
++    df, _ = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=tmp_path / "missing")
++
++    assert str(df["latency_ms"].dtype) == "Int64"
++    assert str(df["token_usage"].dtype) == "Int64"
++    assert str(df["retry_count"].dtype) == "Int64"
++    assert str(df["output_record_count"].dtype) == "Int64"
++    assert str(df["estimated_cost_usd"].dtype) == "float64"
++    assert pd.api.types.is_datetime64_any_dtype(df["event_timestamp"])
++    assert str(df["event_timestamp"].dt.tz) == "UTC"
++
++
++def test_provenance_source_column_distinguishes_synthetic_and_collected(
++    tmp_path: Path,
++) -> None:
++    synthetic_dir = tmp_path / "synthetic"
++    collected_dir = tmp_path / "collected"
++    _write_jsonl(synthetic_dir / "normal" / "traces.jsonl", [_trace("trace-syn")])
++    _write_jsonl(
++        collected_dir / "normal" / "traces.jsonl",
++        [_trace("trace-col", data_type="real")],
++    )
++
++    df, stats = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=collected_dir)
++
++    assert set(df["source"]) == {"synthetic", "collected"}
++    assert stats["input_sources"]["synthetic"]["trace_count"] == 1
++    assert stats["input_sources"]["collected"]["trace_count"] == 1
++    # data_type is preserved independently of source -- the two are never
++    # derived from one another.
++    syn_row = df[df["source"] == "synthetic"].iloc[0]
++    col_row = df[df["source"] == "collected"].iloc[0]
++    assert syn_row["data_type"] == "synthetic"
++    assert col_row["data_type"] == "real"
++
++
++def test_discover_trace_files_excludes_rejection_log(tmp_path: Path) -> None:
++    root = tmp_path / "collected"
++    _write_jsonl(root / "normal" / "traces.jsonl", [_trace("trace-ok")])
++    _write_jsonl(
++        root / "rejected" / "rejections.jsonl",
++        [{"reason": "bad", "trace_id": None, "sanitized_event": {}}],
++    )
++
++    found = discover_trace_files(root)
++
++    assert len(found) == 1
++    assert "rejected" not in found[0].parts
++
++
++def test_discover_trace_files_missing_root_returns_empty_list(tmp_path: Path) -> None:
++    assert discover_trace_files(tmp_path / "does-not-exist") == []
++
++
++def test_no_feature_engineering_columns_present(tmp_path: Path) -> None:
++    """Spot-check against Phase 6 scope leaking into Phase 5 output."""
++
++    synthetic_dir = tmp_path / "synthetic"
++    _write_jsonl(synthetic_dir / "normal" / "traces.jsonl", [_trace("trace-scope")])
++
++    df, _ = build_dataframe(synthetic_dir=synthetic_dir, collected_dir=tmp_path / "missing")
++
++    forbidden_substrings = ("_rate", "_ratio", "_zscore", "rolling_", "baseline_", "per_minute")
++    for column in df.columns:
++        for forbidden in forbidden_substrings:
++            assert forbidden not in column, f"{column!r} looks like a Phase 6 feature"
++
++
++def test_run_writes_versioned_parquet_and_manifest(tmp_path: Path) -> None:
++    synthetic_dir = tmp_path / "synthetic"
++    _write_jsonl(synthetic_dir / "normal" / "traces.jsonl", [_trace("trace-e2e")])
++    output_root = tmp_path / "processed"
++
++    manifest = run(
++        synthetic_dir=synthetic_dir,
++        collected_dir=tmp_path / "missing",
++        output_root=output_root,
++        version="v1",
++    )
++
++    parquet_path = Path(manifest["_parquet_path"])
++    manifest_path = Path(manifest["_manifest_path"])
++    assert parquet_path.exists()
++    assert manifest_path.exists()
++    assert parquet_path.parent == output_root / "v1"
++
++    round_tripped = pd.read_parquet(parquet_path)
++    assert len(round_tripped) == manifest["row_count_after_dedup"]
++
++    manifest_on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
++    assert manifest_on_disk["version"] == "v1"
++    assert "generated_at" in manifest_on_disk
++    assert manifest_on_disk["schema_version"] == "phase5-preprocess-v1"

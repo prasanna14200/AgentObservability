@@ -17,7 +17,7 @@ PRUNED_FEATURES = [f["name"] for f in FEATURE_MANIFEST if f["name"] not in {
     "agent_latency_zscore", "agent_retry_zscore", "agent_token_zscore", "agent_cost_zscore", "calls_so_far"
 }]
 
-INPUT_PATH = "data/features/v2/features.parquet"
+INPUT_PATH = "data/features/v3/features.parquet"
 
 
 def load_features() -> pd.DataFrame:

@@ -13,16 +13,18 @@ Detects anomalous events without requiring labeled anomaly data for training.
 
 ## Training Data
 Trained on normal-labeled traces from the temporal train split:
-- 496 traces, 0 anomalous traces
+- 496 traces, 97 anomalous traces (temporal split includes both classes)
+- Filtered to normal events only before fitting: 399 normal traces, 1473 events
 - All events from normal traces in the earliest 80% of the dataset by timestamp
-- Data source: data/features/v2/features.parquet (pruned 13-feature set)
+- Data source: data/features/v3/features.parquet (pruned 13-feature set)
+- Dataset version: synthetic-mvp1-v2 (interleaved timestamps)
 
 ## Label Source
 Synthetic labels from Phase 2 generator. Anomalous traces were EXCLUDED
 from training per the Master Prompt protocol.
 
 ## Features
-13 pruned features from data/features/v2/:
+13 pruned features from data/features/v3/:
 - 4 agent+task-type-level z-scores: agent_task_latency_zscore,
   agent_task_retry_zscore, agent_task_token_zscore, agent_task_cost_zscore
 - 4 task-type-level z-scores: task_latency_zscore, task_retry_zscore,
@@ -39,10 +41,13 @@ No explicit threshold tuning on validation data. Gate C evaluation uses
 default scikit-learn behavior with contamination="auto".
 
 ## Known Failure Modes
-- May underperform on sequential anomalies (tool_loop, retry_storm) because
-  the naive pooled-feature approach treats each event independently and
-  loses cross-event trajectory context. This is the documented Trajectory
-  Guard finding being tested in this project.
+- Failed Gate C on held-out test set: PR-AUC 0.195 (target >= 0.5), FPR 61.8% (ceiling <= 10%).
+- High false-positive rate on normal events with unusual but legitimate resource usage.
+- May miss subtle anomalies that don't create sufficiently isolated feature vectors.
+- The naive pooled-feature approach (treating each event independently) did NOT
+  reproduce the Trajectory Guard finding of underperformance on sequential anomalies —
+  Isolation Forest actually performed BETTER on tool_loop/retry_storm than on
+  resource_spike in this synthetic dataset.
 - Single-agent scope limits agent-level baseline features; agent_*_zscore
   features are redundant under MVP 1 and were pruned.
 

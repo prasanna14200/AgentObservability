@@ -4,7 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from agentsentinel.data.synth_traces import LIMITATIONS, generate_dataset, write_dataset
+from agentsentinel.data.synth_traces import LIMITATIONS, DATASET_VERSION, generate_dataset, write_dataset
 
 
 def test_generate_dataset_meets_phase_2_counts_and_labels() -> None:
@@ -17,6 +17,7 @@ def test_generate_dataset_meets_phase_2_counts_and_labels() -> None:
     assert len(normal) == 500
     assert len(anomalous) == 120
     assert metadata["data_type"] == "synthetic"
+    assert metadata["dataset_version"] == DATASET_VERSION
     assert metadata["normal_count"] == 500
     assert metadata["anomalous_count"] == 120
 
@@ -67,6 +68,47 @@ def test_write_dataset_creates_expected_files(tmp_path: Path) -> None:
     assert (tmp_path / "anomalous" / "traces.jsonl").exists()
     assert (tmp_path / "metadata.json").exists()
     assert "DATA TYPE: SYNTHETIC" in (tmp_path / "README.md").read_text(encoding="utf-8")
+
+
+def test_generate_dataset_interleaves_timestamps() -> None:
+    normal, anomalous, _ = generate_dataset(normal_count=50, anomalous_count=30, seed=42)
+    all_traces = normal + anomalous
+
+    timestamps = [trace["events"][0]["timestamp"] for trace in all_traces if trace["events"]]
+    labels = [trace["label"] for trace in all_traces if trace["events"]]
+
+    normal_timestamps = [ts for ts, label in zip(timestamps, labels) if label == "normal"]
+    anomalous_timestamps = [ts for ts, label in zip(timestamps, labels) if label == "anomalous"]
+
+    assert min(normal_timestamps) < min(anomalous_timestamps)
+    assert max(normal_timestamps) > min(anomalous_timestamps)
+    assert max(anomalous_timestamps) > min(normal_timestamps)
+
+
+def test_generate_dataset_deterministic_with_shuffle() -> None:
+    first_normal, first_anomalous, _ = generate_dataset(normal_count=60, anomalous_count=20, seed=77)
+    second_normal, second_anomalous, _ = generate_dataset(normal_count=60, anomalous_count=20, seed=77)
+
+    assert len(first_normal) == len(second_normal) == 60
+    assert len(first_anomalous) == len(second_anomalous) == 20
+
+    for i, (a, b) in enumerate(zip(first_normal, second_normal)):
+        assert a == b, f"Normal trace {i} differs between runs with same seed"
+    for i, (a, b) in enumerate(zip(first_anomalous, second_anomalous)):
+        assert a == b, f"Anomalous trace {i} differs between runs with same seed"
+
+
+def test_generate_dataset_different_seed_produces_different_output() -> None:
+    first_normal, first_anomalous, _ = generate_dataset(normal_count=10, anomalous_count=5, seed=1)
+    second_normal, second_anomalous, _ = generate_dataset(normal_count=10, anomalous_count=5, seed=2)
+
+    assert first_normal != second_normal or first_anomalous != second_anomalous
+
+
+def test_generate_dataset_version_is_bumped() -> None:
+    _, _, metadata = generate_dataset()
+    assert metadata["dataset_version"] == DATASET_VERSION
+    assert metadata["dataset_version"] != "synthetic-mvp1-v1"
 
 
 def _sha256(path: Path) -> str:
