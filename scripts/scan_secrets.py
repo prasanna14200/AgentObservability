@@ -50,6 +50,12 @@ def main() -> int:
     for path in ROOT.rglob("*"):
         if not path.is_file() or any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
             continue
+        # Local .env is intentionally credential-bearing. Audit tracked files and
+        # history; verify this one file is ignored without reading/printing it.
+        if path == ROOT / ".env":
+            if subprocess.call(["git", "check-ignore", "-q", ".env"], cwd=ROOT) != 0:
+                alerts.add(("worktree", ".env", "credential file is not ignored"))
+            continue
         worktree_files += 1
         if path.stat().st_size > 5_000_000:
             continue
