@@ -70,6 +70,7 @@ def main() -> int:
     suspicious_paths = [
         line for line in git("log", "--all", "--name-only", "--format=").decode("utf-8", errors="replace").splitlines()
         if re.search(r"(^|/)(?:\.env(?:\.|$)|[^/]*(?:credential|secret|private[-_]key)[^/]*)", line, re.I)
+        and line not in {".env.example", "scripts/scan_secrets.py"}
     ]
     for path in sorted(set(suspicious_paths)):
         alerts.add(("history_filename", path, "credential-shaped filename"))
