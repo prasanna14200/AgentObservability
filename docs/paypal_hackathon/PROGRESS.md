@@ -6,7 +6,7 @@ Updated: 2026-10-12. The statuses below refer to the **new 12 stages**, not the 
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Repository audit | COMPLETE | Master plan; `docs/`; `src/`; `tests/`; `models/model_cards/`; `notebooks/`; `data/` | `docs/paypal_hackathon/01_repository_audit.md`, this file | 41 tests passed; read-only data and metric checks documented in audit | None for Stage 1; await approval for Stage 2 |
 | 2 | Existing pipeline verification | COMPLETE | Synthetic data, schema, collector, preprocessing, features, detectors, tests, model cards | `src/agentsentinel/data/{synth_traces,preprocess,split}.py`; `src/agentsentinel/features/contextual.py`; `src/agentsentinel/detectors/isoforest.py`; redaction and collector; tests; evaluation script/notebook; v3 synthetic and v4 feature artifacts; model cards; setup; `02_pipeline_verification.md`; this file | 49 passed; deterministic reruns; corrected rules AP 0.463/FPR 0%; Isolation Forest AP 0.706/FPR 56.9%; Gate C FAIL | Stage 2 done; Stage 3 needs payment schema and strict telemetry boundaries |
-| 3 | Payment-specific schema | NOT STARTED | Trace schema, redaction, schema tests | — | — | Payment intent and scope models with compatibility tests |
+| 3 | Payment-specific schema | COMPLETE (Day 4) | Trace schema, redaction, schema tests | `src/agentsentinel/schema/payment.py`; `tests/unit/test_payment_schema.py`; `04_payment_schema.md`; this file | Strict payment contracts and compatibility tests; see Day 4 handoff | Stage 4 policy must obtain trusted authorization evidence |
 | 4 | Payment policy engine | NOT STARTED | Schema, test conventions | — | — | Deterministic ALLOW/REVIEW/BLOCK policy and tests |
 | 5 | Pre-execution safety gateway | NOT STARTED | Collector, policy result from Stage 4 | — | — | Protected execution boundary and bypass tests |
 | 6 | AI purchase assistant | NOT STARTED | Trace identity and gateway interface | — | — | Request-to-proposal agent with no payment authority |
@@ -17,7 +17,7 @@ Updated: 2026-10-12. The statuses below refer to the **new 12 stages**, not the 
 | 11 | End-to-end tests | NOT STARTED | All implemented components | — | — | Scenarios, evaluation report, known limitations |
 | 12 | Submission preparation | NOT STARTED | Docs and system artifacts | — | — | README, diagram, setup, env template, license, demo plan, current rules verification |
 
-Next authorized action: wait for the user's approval before beginning Stage 3.
+The older 12-stage checklist above records Stage 3 schema completion only. Stage 4 policy, Stage 5 gateway, and Stage 7 full PayPal integration remain incomplete; the Day 2 Sandbox proof of concept does not complete them.
 
 ## PayPal AI Hackathon Day 1
 
@@ -30,3 +30,7 @@ Day 2 is **COMPLETE** as an isolated Sandbox REST proof of concept. It added a S
 ## PayPal MCP feasibility Day 3
 
 Day 3 is **COMPLETE** as a feasibility spike; see `03_mcp_feasibility.md`. Official PayPal docs and published server source were checked on 2026-10-12. The already installed Python MCP SDK connected to the hosted Sandbox `/sse` endpoint, initialized, and discovered 46 tool names without invoking any tool. The documented `/http` endpoint returned MCP error `32600`; its cause is unverified. No package was installed and the local Node server was not launched. The decision is to keep the verified REST wrapper primary and consider MCP only as a future gateway-controlled optional adapter. Final tests, audit, commit, and push are recorded in the Day 3 handoff. The 12-stage payment schema, policy, safety gateway, AI assistant, and dashboard remain NOT STARTED.
+
+## Payment schema Day 4
+
+Day 4 is **COMPLETE** as a payment data-contract stage; see `04_payment_schema.md`. Payment intents, claimed authorization records, exact money, and sanitized execution metadata are modeled separately from legacy traces. Parsing an authorization-shaped payload never proves buyer consent or permits execution. The existing REST and MCP spikes are unchanged. Stage 4 policy, Stage 5 gateway, and remaining integration work await approval. Final test, audit, commit, and push outcomes are reported in the Day 4 handoff.
