@@ -68,7 +68,8 @@ class TraceCollector:
         if isinstance(copied, Mapping):
             redacted, _ = redact_mapping(copied)
             return redacted
-        return {"malformed_payload": repr(raw_event)}
+        # A non-mapping value has no trustworthy field names to redact.
+        return {"malformed_payload_type": type(raw_event).__name__}
 
     def _write_trace(self, trace: TraceRecord) -> None:
         label = trace.audit.label or "unlabeled"

@@ -1,5 +1,9 @@
 # Model Card: Rules Engine
 
+## Stage 2 corrected evaluation (current)
+
+See `docs/paypal_hackathon/02_pipeline_verification.md` and run `python scripts/evaluate_offline.py` to reproduce. On synthetic dataset v3 with normal-training-fitted v4 features, the held-out test set has PR-AUC **0.463**, AUROC **0.640**, precision **1.000**, recall **0.281**, F1 **0.439**, FPR **0.000** (TP 25, FP 0, TN 262, FN 64). Thresholds were unchanged. The v3 feature results below are retained as historical results.
+
 ## Intended Use
 Deterministic anomaly detection for customer-support agent tool-call traces.
 Flags three anomaly types: tool_loop, retry_storm, resource_spike.

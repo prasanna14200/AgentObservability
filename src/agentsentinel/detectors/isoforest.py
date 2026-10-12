@@ -36,6 +36,7 @@ def predict_isolation_forest(model: IsolationForest, df: pd.DataFrame) -> pd.Dat
     df = df.copy()
     X = df[FEATURES].values
     df["iso_raw_score"] = model.decision_function(X)
+    df["iso_anomaly_score"] = -df["iso_raw_score"]
     df["iso_prediction"] = model.predict(X)
     df["iso_anomaly"] = df["iso_prediction"] == -1
     return df
@@ -50,5 +51,6 @@ def get_isoforest_metadata() -> dict[str, Any]:
         "random_state": RANDOM_SEED,
         "features": FEATURES,
         "training_protocol": "Trained only on normal-labeled traces from the temporal train split. Anomalous traces are validation/test only.",
-        "feature_set": "13 pruned features from data/features/v2/features.parquet",
+        "feature_set": "13 pruned features from data/features/v4/features.parquet",
+        "score_convention": "iso_anomaly_score = -decision_function; higher means more anomalous",
     }

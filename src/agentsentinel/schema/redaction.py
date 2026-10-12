@@ -12,6 +12,7 @@ SENSITIVE_KEY_PARTS = (
     "password",
     "credential",
     "secret",
+    "authorization",
 )
 
 # "token" is handled separately from SENSITIVE_KEY_PARTS, not folded into it

@@ -150,5 +150,13 @@ def test_collector_default_sink_uses_collected_data_root() -> None:
     assert collector.sink_root == Path("data/collected")
 
 
+def test_non_mapping_rejection_does_not_store_raw_value(tmp_path: Path) -> None:
+    collector = TraceCollector(sink_root=tmp_path)
+    assert collector.capture(["RAW-SECRET-IN-LIST"]) is None
+    log = (tmp_path / "rejected" / "rejections.jsonl").read_text(encoding="utf-8")
+    assert "RAW-SECRET-IN-LIST" not in log
+    assert "malformed_payload_type" in log
+
+
 def _load_first(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8").splitlines()[0])

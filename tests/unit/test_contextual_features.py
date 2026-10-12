@@ -15,6 +15,8 @@ from agentsentinel.features.contextual import (
     _build_tool_permissions_map,
     _safe_zscore,
     build_features,
+    fit_baselines,
+    transform_with_baselines,
 )
 
 
@@ -216,9 +218,11 @@ def test_build_features_writes_parquet_and_manifest(tmp_path: Path) -> None:
         manifest = build_features(output_dir=output)
         assert (output / "features.parquet").exists()
         assert (output / "manifest.json").exists()
-        assert manifest["version"] == "v1"
-        assert manifest["row_count"] == 1823
+        assert manifest["version"] == "v4"
+        assert manifest["row_count"] == 1831
         assert len(manifest["features"]) == 18
+        assert manifest["train_traces"] == 496
+        assert manifest["test_traces"] == 124
     finally:
         ctx_module.OUTPUT_DIR = original_output
 
@@ -230,3 +234,46 @@ def test_no_model_training_or_rules_in_contextual_module() -> None:
     banned = ["IsolationForest", "RandomForest", "XGBoost", "train_test_split", "fit(", "predict(", "rule_engine"]
     for token in banned:
         assert token not in source, f"Phase 6 must not contain model/rules logic: {token}"
+
+
+def test_future_rows_cannot_change_frozen_training_features() -> None:
+    rows = _make_trace_df([
+        {"trace_id": "train-a", "agent_id": "agent-1", "task_type": "lookup", "events": [
+            {"event_id": "a", "timestamp": "2026-01-01T00:00:00Z", "tool_name": "get_order", "latency_ms": 10},
+        ]},
+        {"trace_id": "train-b", "agent_id": "agent-1", "task_type": "lookup", "events": [
+            {"event_id": "b", "timestamp": "2026-01-01T00:01:00Z", "tool_name": "get_order", "latency_ms": 20},
+        ]},
+    ])
+    future = rows.iloc[[0]].copy()
+    future["trace_id"] = "future"
+    future["latency_ms"] = 100000
+    train_stats = fit_baselines(rows)
+    original = transform_with_baselines(rows, train_stats)
+    after_future_arrives = transform_with_baselines(rows, train_stats)
+    pd.testing.assert_frame_equal(original, after_future_arrives)
+    assert transform_with_baselines(future, train_stats)["task_latency_zscore"].iloc[0] > 1000
+    assert fit_baselines(pd.concat([rows, future]))["task"].loc["lookup", ("latency_ms", "mean")] != train_stats["task"].loc["lookup", ("latency_ms", "mean")]
+
+
+def test_build_features_is_invariant_to_future_metric_changes(tmp_path: Path) -> None:
+    rows = _make_trace_df([
+        {"trace_id": f"trace-{i}", "agent_id": "agent-1", "task_type": "lookup", "events": [
+            {"event_id": f"event-{i}", "timestamp": f"2026-01-01T00:0{i}:00Z", "tool_name": "get_order", "latency_ms": 10 * (i + 1), "permissions": ["orders:read"]},
+        ]} for i in range(5)
+    ])
+    rows["label"] = "normal"
+    rows["anomaly_type"] = "__UNKNOWN__"
+    first_input = tmp_path / "first.parquet"
+    second_input = tmp_path / "second.parquet"
+    rows.to_parquet(first_input)
+    changed = rows.copy()
+    changed.loc[changed.trace_id == "trace-4", "latency_ms"] = 100000
+    changed.to_parquet(second_input)
+    build_features(output_dir=tmp_path / "first", input_path=first_input)
+    build_features(output_dir=tmp_path / "second", input_path=second_input)
+    first = pd.read_parquet(tmp_path / "first/features.parquet")
+    second = pd.read_parquet(tmp_path / "second/features.parquet")
+    columns = ["trace_id", "agent_latency_zscore", "task_latency_zscore", "agent_task_latency_zscore", "permission_match"]
+    pd.testing.assert_frame_equal(first.loc[first.trace_id != "trace-4", columns].reset_index(drop=True), second.loc[second.trace_id != "trace-4", columns].reset_index(drop=True))
+    assert first.loc[first.trace_id == "trace-4", "task_latency_zscore"].iloc[0] != second.loc[second.trace_id == "trace-4", "task_latency_zscore"].iloc[0]

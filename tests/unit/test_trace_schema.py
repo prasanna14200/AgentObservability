@@ -83,6 +83,12 @@ def test_redaction_catches_bare_and_compound_token_fields() -> None:
     assert "raw-session-token" not in json.dumps(clean)
 
 
+def test_redaction_catches_authorization_header() -> None:
+    clean, redacted = redact_mapping({"Authorization": "Bearer RAW-SECRET"})
+    assert redacted
+    assert "RAW-SECRET" not in json.dumps(clean)
+
+
 def test_schema_does_not_define_raw_secret_fields() -> None:
     banned_names = {"api_key", "access_token", "password", "credential", "secret"}
     field_names = _collect_model_field_names(TraceRecord)

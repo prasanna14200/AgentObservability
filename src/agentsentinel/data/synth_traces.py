@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-DATASET_VERSION = "synthetic-mvp1-v2"
+DATASET_VERSION = "synthetic-mvp1-v3"
 DEFAULT_SEED = 20260818
 TOOLS = ("search_customer", "get_order", "update_order")
 LIMITATIONS = (
@@ -31,10 +31,9 @@ def generate_dataset(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Return deterministic normal traces, anomalous traces, and metadata.
 
-    Trace start timestamps are interleaved across normal and anomalous traces
-    by shuffling each class independently and then interleaving in round-robin
-    fashion. This prevents the temporal split from trivially separating classes
-    by generation batch while maintaining determinism.
+    Trace start timestamps are spread across the whole observation window.
+    The earlier round-robin arrangement exhausted anomalous traces early and
+    left the chronological test window with no anomalies.
     """
 
     if normal_count < 0 or anomalous_count < 0:
@@ -48,15 +47,19 @@ def generate_dataset(
     rng.shuffle(normal_indices)
     rng.shuffle(anomalous_indices)
 
-    max_len = max(len(normal_indices), len(anomalous_indices))
+    total = normal_count + anomalous_count
+    anomaly_positions = set(rng.sample(range(total), anomalous_count))
+    normal_iter = iter(normal_indices)
+    anomalous_iter = iter(anomalous_indices)
     interleaved_indices = []
-    for i in range(max_len):
-        if i < len(normal_indices):
-            interleaved_indices.append(("normal", None, normal_indices[i]))
-        if i < len(anomalous_indices):
+    for position in range(total):
+        if position in anomaly_positions:
+            trace_index = next(anomalous_iter)
             anomaly_types = ("tool_loop", "retry_storm", "resource_spike")
-            anomaly_type = anomaly_types[(anomalous_indices[i] - normal_count) % len(anomaly_types)]
-            interleaved_indices.append(("anomalous", anomaly_type, anomalous_indices[i]))
+            anomaly_type = anomaly_types[(trace_index - normal_count) % len(anomaly_types)]
+            interleaved_indices.append(("anomalous", anomaly_type, trace_index))
+        else:
+            interleaved_indices.append(("normal", None, next(normal_iter)))
 
     normal_traces = []
     anomalous_traces = []

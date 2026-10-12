@@ -77,6 +77,19 @@ def test_load_raw_traces_preserves_synthetic_and_collected_provenance(tmp_path: 
         preprocess_module.INPUT_PATHS = original_paths
 
 
+def test_flattening_redacts_secret_shaped_tool_arguments() -> None:
+    trace = {
+        "trace_id": "trace-1",
+        "events": [{
+            "event_id": "event-1",
+            "tool_input_metadata": {"Authorization": "Bearer RAW-SECRET", "query_kind": "lookup"},
+        }],
+    }
+    row = _flatten_trace(trace, "collected")[0]
+    assert "RAW-SECRET" not in row["tool_input_metadata"]
+    assert json.loads(row["tool_input_metadata"])["query_kind"] == "lookup"
+
+
 def test_missing_label_and_anomaly_type_filled_with_sentinel() -> None:
     trace = {
         "trace_id": "trace-null-001",

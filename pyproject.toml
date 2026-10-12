@@ -2,9 +2,12 @@
 name = "agentsentinel"
 version = "0.1.0"
 description = "Runtime safety control plane experiments for AI agent tool calls."
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
+    "pandas>=2.3",
+    "scikit-learn>=1.7",
+    "pyarrow>=23.0",
 ]
 
 [project.optional-dependencies]

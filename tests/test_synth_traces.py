@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from agentsentinel.data.synth_traces import LIMITATIONS, DATASET_VERSION, generate_dataset, write_dataset
+from agentsentinel.schema.trace import TraceRecord
 
 
 def test_generate_dataset_meets_phase_2_counts_and_labels() -> None:
@@ -83,6 +84,19 @@ def test_generate_dataset_interleaves_timestamps() -> None:
     assert min(normal_timestamps) < min(anomalous_timestamps)
     assert max(normal_timestamps) > min(anomalous_timestamps)
     assert max(anomalous_timestamps) > min(normal_timestamps)
+
+
+def test_chronological_test_window_contains_both_classes() -> None:
+    normal, anomalous, _ = generate_dataset(seed=20260818)
+    ordered = sorted(normal + anomalous, key=lambda trace: trace["events"][0]["timestamp"])
+    last_twenty_percent = ordered[int(len(ordered) * 0.8):]
+    assert {trace["label"] for trace in last_twenty_percent} == {"normal", "anomalous"}
+
+
+def test_corrected_generated_dataset_validates_against_existing_schema() -> None:
+    normal, anomalous, _ = generate_dataset(seed=20260818)
+    for trace in normal + anomalous:
+        assert TraceRecord.model_validate(trace).to_phase2_record() == trace
 
 
 def test_generate_dataset_deterministic_with_shuffle() -> None:

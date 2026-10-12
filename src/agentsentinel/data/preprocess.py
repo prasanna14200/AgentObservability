@@ -13,6 +13,8 @@ from typing import Any
 
 import pandas as pd
 
+from agentsentinel.schema.redaction import redact_mapping
+
 NULL_LABEL_SENTINEL = "__UNKNOWN__"
 VERSION = "v1"
 OUTPUT_DIR = Path("data/processed") / VERSION
@@ -54,6 +56,10 @@ def _flatten_trace(trace: dict[str, Any], source: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for event in events:
         tool_output = event.get("tool_output_metadata", {})
+        tool_input = event.get("tool_input_metadata", {})
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        safe_tool_input, _ = redact_mapping(tool_input)
         rows.append({
             "source": source,
             "trace_id": trace.get("trace_id"),
@@ -69,7 +75,7 @@ def _flatten_trace(trace: dict[str, Any], source: str) -> list[dict[str, Any]]:
             "timestamp": event.get("timestamp"),
             "event_type": event.get("event_type"),
             "tool_name": event.get("tool_name"),
-            "tool_input_metadata": json.dumps(event.get("tool_input_metadata", {}), sort_keys=True),
+            "tool_input_metadata": json.dumps(safe_tool_input, sort_keys=True),
             "tool_output_metadata": json.dumps(tool_output, sort_keys=True),
             "latency_ms": event.get("latency_ms"),
             "status": event.get("status"),
@@ -103,10 +109,12 @@ def _deduplicate(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     return df, dropped
 
 
-def load_raw_traces() -> pd.DataFrame:
+def load_raw_traces(input_paths: dict[str, list[Path]] | None = None) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
 
-    for source, paths in INPUT_PATHS.items():
+    if input_paths is None:
+        input_paths = INPUT_PATHS
+    for source, paths in input_paths.items():
         for path in paths:
             for trace in _load_jsonl(path):
                 rows.extend(_flatten_trace(trace, source))
@@ -115,8 +123,14 @@ def load_raw_traces() -> pd.DataFrame:
     return df
 
 
-def preprocess(output_dir: Path = OUTPUT_DIR, version: str = VERSION) -> dict[str, Any]:
-    df = load_raw_traces()
+def preprocess(
+    output_dir: Path = OUTPUT_DIR,
+    version: str = VERSION,
+    input_paths: dict[str, list[Path]] | None = None,
+) -> dict[str, Any]:
+    if input_paths is None:
+        input_paths = INPUT_PATHS
+    df = load_raw_traces(input_paths)
     before_dedup = len(df)
 
     df = _coerce_types(df)
@@ -129,7 +143,7 @@ def preprocess(output_dir: Path = OUTPUT_DIR, version: str = VERSION) -> dict[st
     manifest = {
         "version": version,
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "input_sources": {source: [str(p) for p in paths] for source, paths in INPUT_PATHS.items()},
+        "input_sources": {source: [str(p) for p in paths] for source, paths in input_paths.items()},
         "row_counts": {
             "before_dedup": int(before_dedup),
             "after_dedup": int(len(df)),

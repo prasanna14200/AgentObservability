@@ -1,5 +1,9 @@
 # Model Card: Isolation Forest
 
+## Stage 2 corrected evaluation (current)
+
+See `docs/paypal_hackathon/02_pipeline_verification.md` and run `python scripts/evaluate_offline.py` to reproduce. The v4 feature artifact fits contextual baselines on **normal chronological training rows only**; synthetic dataset v3 distributes anomalies across the entire time range. `iso_anomaly_score = -decision_function`, so higher scores mean more anomalous. On the held-out test set: PR-AUC **0.706**, AUROC **0.802**, precision **0.335**, recall **0.843**, F1 **0.479**, FPR **0.569** (TP 75, FP 149, TN 113, FN 14). **Gate C fails** its 10% FPR ceiling. All v3 feature results below are retained as historical results and must not be cited as the corrected evaluation.
+
 ## Intended Use
 Unsupervised anomaly detection for customer-support agent tool-call traces.
 Detects anomalous events without requiring labeled anomaly data for training.

@@ -15,9 +15,10 @@ import pandas as pd
 
 from agentsentinel.data.preprocess import OUTPUT_DIR as PROCESSED_DIR
 
-VERSION = "v1"
+VERSION = "v4"
 OUTPUT_DIR = Path("data/features") / VERSION
-INPUT_PATH = PROCESSED_DIR / "traces.parquet"
+INPUT_PATH = Path("data/processed/v4/traces.parquet")
+TRAIN_FRACTION = 0.8
 
 METRIC_COLUMNS = ["latency_ms", "retry_count", "token_usage", "estimated_cost_usd"]
 
@@ -204,70 +205,75 @@ def _add_trajectory_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_permission_match(df: pd.DataFrame, tool_perms_map: dict[str, list[str]]) -> pd.DataFrame:
     agent_perms = _parse_json(df["permissions"]).apply(lambda x: x if isinstance(x, list) else [])
-    required_perms = df["tool_name"].map(lambda t: tool_perms_map.get(t, []))
+    required_perms = df["tool_name"].map(lambda t: tool_perms_map.get(t))
 
     df["permission_match"] = [
-        set(req).issubset(set(agent)) for agent, req in zip(agent_perms, required_perms)
+        req is not None and set(req).issubset(set(agent))
+        for agent, req in zip(agent_perms, required_perms)
     ]
     return df
 
 
+BASELINE_SCOPES = {
+    "agent": ["agent_id"],
+    "task": ["task_type"],
+    "agent_task": ["agent_id", "task_type"],
+}
+
+
+def fit_baselines(train_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """Fit all contextual statistics on the chronological training rows only."""
+    return {
+        scope: train_df.groupby(keys, dropna=False)[METRIC_COLUMNS].agg(["mean", "std"])
+        for scope, keys in BASELINE_SCOPES.items()
+    }
+
+
+def transform_with_baselines(
+    df: pd.DataFrame, baselines: dict[str, pd.DataFrame]
+) -> pd.DataFrame:
+    """Apply frozen training statistics to any split without refitting."""
+    result = df.copy()
+    for scope, keys in BASELINE_SCOPES.items():
+        stats = baselines[scope]
+        for metric in METRIC_COLUMNS:
+            suffix = METRIC_SUFFIXES[metric]
+            lookup = stats[metric].reset_index()
+            matched = result[keys].merge(lookup, on=keys, how="left", sort=False)
+            result[f"{scope}_{suffix}_zscore"] = _safe_zscore(
+                result[metric].reset_index(drop=True), matched["mean"], matched["std"]
+            ).to_numpy()
+    return result
+
+
 def _add_baseline_features(df: pd.DataFrame) -> pd.DataFrame:
-    for metric in METRIC_COLUMNS:
-        suffix = METRIC_SUFFIXES[metric]
-
-        agent_stats = df.groupby("agent_id")[metric].agg(["mean", "std"]).reset_index()
-        agent_stats.columns = ["agent_id", f"agent_{suffix}_mean", f"agent_{suffix}_std"]
-        df = df.merge(agent_stats, on="agent_id", how="left")
-
-        task_stats = df.groupby("task_type")[metric].agg(["mean", "std"]).reset_index()
-        task_stats.columns = ["task_type", f"task_{suffix}_mean", f"task_{suffix}_std"]
-        df = df.merge(task_stats, on="task_type", how="left")
-
-        agent_task_stats = (
-            df.groupby(["agent_id", "task_type"])[metric].agg(["mean", "std"]).reset_index()
-        )
-        agent_task_stats.columns = [
-            "agent_id",
-            "task_type",
-            f"agent_task_{suffix}_mean",
-            f"agent_task_{suffix}_std",
-        ]
-        df = df.merge(agent_task_stats, on=["agent_id", "task_type"], how="left")
-
-        df[f"agent_{suffix}_zscore"] = _safe_zscore(
-            df[metric], df[f"agent_{suffix}_mean"], df[f"agent_{suffix}_std"]
-        )
-        df[f"task_{suffix}_zscore"] = _safe_zscore(
-            df[metric], df[f"task_{suffix}_mean"], df[f"task_{suffix}_std"]
-        )
-        df[f"agent_task_{suffix}_zscore"] = _safe_zscore(
-            df[metric], df[f"agent_task_{suffix}_mean"], df[f"agent_task_{suffix}_std"]
-        )
-
-        df.drop(
-            columns=[
-                f"agent_{suffix}_mean",
-                f"agent_{suffix}_std",
-                f"task_{suffix}_mean",
-                f"task_{suffix}_std",
-                f"agent_task_{suffix}_mean",
-                f"agent_task_{suffix}_std",
-            ],
-            inplace=True,
-        )
-
-    return df
+    """Compatibility helper for standalone Phase 6 feature tests."""
+    return transform_with_baselines(df, fit_baselines(df))
 
 
-def build_features(output_dir: Path = OUTPUT_DIR, version: str = VERSION) -> dict[str, Any]:
-    df = pd.read_parquet(INPUT_PATH)
+def build_features(
+    output_dir: Path = OUTPUT_DIR,
+    version: str = VERSION,
+    input_path: Path = INPUT_PATH,
+) -> dict[str, Any]:
+    from agentsentinel.data.split import temporal_split
+
+    df = pd.read_parquet(input_path)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
 
-    tool_perms_map = _build_tool_permissions_map(df)
-    df = _add_trajectory_features(df)
-    df = _add_permission_match(df, tool_perms_map)
-    df = _add_baseline_features(df)
+    train_raw, test_raw, cutoff_time = temporal_split(df, train_frac=TRAIN_FRACTION)
+    normal_train = train_raw.loc[train_raw["label"] == "normal"]
+    if normal_train.empty:
+        raise ValueError("normal training traces are required to fit contextual baselines")
+    baselines = fit_baselines(normal_train)
+    tool_perms_map = _build_tool_permissions_map(normal_train)
+    train = transform_with_baselines(
+        _add_permission_match(_add_trajectory_features(train_raw), tool_perms_map), baselines
+    )
+    test = transform_with_baselines(
+        _add_permission_match(_add_trajectory_features(test_raw), tool_perms_map), baselines
+    )
+    df = pd.concat([train, test], ignore_index=True)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "features.parquet"
@@ -276,7 +282,12 @@ def build_features(output_dir: Path = OUTPUT_DIR, version: str = VERSION) -> dic
     manifest = {
         "version": version,
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "input_source": str(INPUT_PATH),
+        "input_source": str(input_path),
+        "split_protocol": "earliest 80% of traces by start time for training; latest 20% for test",
+        "cutoff_time": cutoff_time.isoformat(),
+        "train_traces": int(train_raw["trace_id"].nunique()),
+        "test_traces": int(test_raw["trace_id"].nunique()),
+        "baseline_fit": "normal training rows only",
         "features": FEATURE_MANIFEST,
         "row_count": int(len(df)),
     }

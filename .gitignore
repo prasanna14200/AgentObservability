@@ -7,11 +7,14 @@ venv/
 .env
 .env.*
 !.env.example
-data/synthetic/
+data/synthetic/*
+!data/synthetic/v3/
 data/collected/
 data/processed/
-data/features/
+data/features/*
 !data/features/v2/
+!data/features/v4/
+!data/synthetic/v3/
 *.db
 *.sqlite
 *.sqlite3

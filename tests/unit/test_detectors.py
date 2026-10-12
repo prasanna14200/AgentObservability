@@ -36,8 +36,8 @@ def test_split_info_matches_expected_counts() -> None:
 
     assert info["train_traces"] == 496
     assert info["test_traces"] == 124
-    assert info["train_anomalous_traces"] == 97
-    assert info["test_anomalous_traces"] == 23
+    assert info["train_anomalous_traces"] == 101
+    assert info["test_anomalous_traces"] == 19
     assert len(info["features_used"]) == 13
 
 
@@ -128,9 +128,22 @@ def test_isoforest_predictions_have_expected_columns() -> None:
     result = predict_isolation_forest(model, test.head(10))
 
     assert "iso_raw_score" in result.columns
+    assert "iso_anomaly_score" in result.columns
     assert "iso_prediction" in result.columns
     assert "iso_anomaly" in result.columns
     assert set(result["iso_prediction"].unique()).issubset({-1, 1})
+    assert (result["iso_anomaly_score"] == -result["iso_raw_score"]).all()
+    assert (result["iso_anomaly"] == result["iso_anomaly_score"].gt(0)).all()
+
+
+def test_isoforest_anomaly_score_ranks_flagged_events_higher() -> None:
+    df = load_features()
+    train, test, _ = temporal_split(df)
+    model = train_isolation_forest(train)
+    result = predict_isolation_forest(model, test)
+    assert result.loc[result.iso_anomaly, "iso_anomaly_score"].min() > result.loc[~result.iso_anomaly, "iso_anomaly_score"].max()
+    samples = model.score_samples(test[get_isoforest_metadata()["features"]].values)
+    assert ((samples - model.offset_ - result.iso_raw_score.to_numpy()).round(12) == 0).all()
 
 
 def test_isoforest_metadata_records_seed_and_features() -> None:
