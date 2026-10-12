@@ -18,3 +18,7 @@ Updated: 2026-10-12. The statuses below refer to the **new 12 stages**, not the 
 | 12 | Submission preparation | NOT STARTED | Docs and system artifacts | — | — | README, diagram, setup, env template, license, demo plan, current rules verification |
 
 Next authorized action: wait for the user's approval before beginning Stage 3.
+
+## PayPal AI Hackathon Day 1
+
+Day 1 repository verification and preparation are complete locally on 2026-10-12. The official start is 2026-10-01 16:15 UTC. `pre-hackathon-baseline` points to eligible commit `d75579747ac42e5cf6960b2c00f1fdcc4408b43d`. Gate C's metric and 10% FPR ceiling were committed in `5a9dbe2` before the first evaluation commit `69b12fc`; the numeric 0.5 PR-AUC target was not in that preregistration. The current product remains the offline prototype described in Stages 1 and 2. Day 1 adds an accurate README, Apache-2.0 license, scope/provenance, placeholder environment template, official-source registry, and a value-suppressing secret-audit script. The final test, secret-scan, commit, and push outcomes are reported in the Day 1 handoff; Stage 3 remains NOT STARTED.

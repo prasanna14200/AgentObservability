@@ -7,6 +7,14 @@ venv/
 .env
 .env.*
 !.env.example
+*credentials*.json
+*secrets*.json
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
 data/synthetic/*
 !data/synthetic/v3/
 data/collected/

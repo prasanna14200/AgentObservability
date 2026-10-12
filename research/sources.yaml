@@ -1,0 +1,65 @@
+# Day 1 official-source registry. Verified by direct page access on 2026-10-12.
+# Historical research sources remain in research/competitions/sources.yaml.
+
+- source_id: paypal_hackathon_rules_2026
+  title: "PayPal AI Hackathon Official Rules"
+  url: "https://paypalaihackathon.devpost.com/rules"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "Submission begins Oct 1, 2026 at 9:15 am Pacific (16:15 UTC); existing projects must be significantly updated after the start. A PayPal Sandbox integration and an AI tool/model/platform are required."
+
+- source_id: paypal_sandbox_accounts
+  title: "Sandbox accounts"
+  url: "https://developer.paypal.com/sandbox-testing/accounts"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "Personal accounts represent buyers, business accounts merchants. A developer account normally provides one of each and allows additional Sandbox accounts."
+
+- source_id: paypal_rest_credentials
+  title: "Get started with PayPal REST APIs"
+  url: "https://developer.paypal.com/api/get-started/"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "Sandbox REST apps use a client ID and client secret from Apps & Credentials; exchange them for OAuth access tokens. The guide explains Sandbox account login verification."
+
+- source_id: paypal_orders_flow
+  title: "How to use PayPal REST APIs"
+  url: "https://developer.paypal.com/api/rest/integration/orders-api"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "For CAPTURE intent, server creates order, buyer follows approve URL and approves, then merchant captures the approved order. Orders v2 supports fetching order details."
+
+- source_id: paypal_request_id
+  title: "Making PayPal REST API requests"
+  url: "https://developer.paypal.com/api/make-api-requests/"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "PayPal recommends PayPal-Request-Id for POST/PUT idempotency; retention varies by endpoint, so a local durable operation record and endpoint-specific API reference remain necessary. The guide states up to 45 days generally, while Create Order documents a shorter default."
+
+- source_id: paypal_orders_create_reference
+  title: "Create order - Orders v2 SDK"
+  url: "https://developer.paypal.com/sdk/orders/v2/orders-create/"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "Orders v2 Create Order accepts PayPal-Request-Id. Its reference states the server stores keys for 6 hours by default, with longer retention subject to account arrangement."
+
+- source_id: paypal_mcp_server
+  title: "MCP server quickstart guide"
+  url: "https://developer.paypal.com/ai-tools/mcp-server"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "PayPal documents local @paypal/mcp and remote MCP servers, including a Sandbox endpoint. Availability does not make a raw MCP tool safe to expose to an autonomous payment agent."
+
+- source_id: paypal_agent_toolkit
+  title: "Developer's Quickstart Guide to PayPal's Agent Toolkit"
+  url: "https://developer.paypal.com/community/blog/quickstart-guide-agent-toolkit/"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "PayPal's own developer blog identifies @paypal/agent-toolkit and describes commerce tool integration. The linked detailed paypal.ai quickstart could not be fetched in this review, so current toolkit API details remain UNVERIFIED."
+
+- source_id: paypal_negative_testing
+  title: "Simulate negative responses with request headers"
+  url: "https://developer.paypal.com/negative-testing/request-headers/"
+  verification_date: "2026-10-12"
+  status: VERIFIED
+  findings: "Sandbox negative testing can use PayPal-Mock-Response with mock_application_codes on documented Orders/Payments methods; exact supported errors depend on endpoint."
