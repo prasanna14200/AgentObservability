@@ -1,13 +1,13 @@
 # PayPal hackathon implementation progress
 
-Updated: 2026-10-12. The statuses below refer to the **new 12 stages**, not the original master-plan phase numbers.
+Updated: 2026-10-13. The statuses below refer to the **new 12 stages**, not the original master-plan phase numbers.
 
 | Stage | Stage name | Status | Existing files reused | Files changed | Tests and evidence | Remaining work |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | Repository audit | COMPLETE | Master plan; `docs/`; `src/`; `tests/`; `models/model_cards/`; `notebooks/`; `data/` | `docs/paypal_hackathon/01_repository_audit.md`, this file | 41 tests passed; read-only data and metric checks documented in audit | None for Stage 1; await approval for Stage 2 |
 | 2 | Existing pipeline verification | COMPLETE | Synthetic data, schema, collector, preprocessing, features, detectors, tests, model cards | `src/agentsentinel/data/{synth_traces,preprocess,split}.py`; `src/agentsentinel/features/contextual.py`; `src/agentsentinel/detectors/isoforest.py`; redaction and collector; tests; evaluation script/notebook; v3 synthetic and v4 feature artifacts; model cards; setup; `02_pipeline_verification.md`; this file | 49 passed; deterministic reruns; corrected rules AP 0.463/FPR 0%; Isolation Forest AP 0.706/FPR 56.9%; Gate C FAIL | Stage 2 done; Stage 3 needs payment schema and strict telemetry boundaries |
 | 3 | Payment-specific schema | COMPLETE (Day 4) | Trace schema, redaction, schema tests | `src/agentsentinel/schema/payment.py`; `tests/unit/test_payment_schema.py`; `04_payment_schema.md`; this file | Strict payment contracts and compatibility tests; see Day 4 handoff | Stage 4 policy must obtain trusted authorization evidence |
-| 4 | Payment policy engine | NOT STARTED | Schema, test conventions | — | — | Deterministic ALLOW/REVIEW/BLOCK policy and tests |
+| 4 | Payment policy engine | COMPLETE (Day 5) | Payment schema, test conventions | `src/agentsentinel/payment_policy.py`; `tests/unit/test_payment_policy.py`; `05_payment_policy.md`; this file | Deterministic ALLOW/REVIEW/BLOCK policy and trust-boundary tests; see Day 5 handoff | Stage 5 gateway must supply authenticated scope and trusted repository |
 | 5 | Pre-execution safety gateway | NOT STARTED | Collector, policy result from Stage 4 | — | — | Protected execution boundary and bypass tests |
 | 6 | AI purchase assistant | NOT STARTED | Trace identity and gateway interface | — | — | Request-to-proposal agent with no payment authority |
 | 7 | PayPal Sandbox | NOT STARTED | Gateway and policy | — | — | Sandbox order, buyer approval, capture integration |
@@ -17,7 +17,7 @@ Updated: 2026-10-12. The statuses below refer to the **new 12 stages**, not the 
 | 11 | End-to-end tests | NOT STARTED | All implemented components | — | — | Scenarios, evaluation report, known limitations |
 | 12 | Submission preparation | NOT STARTED | Docs and system artifacts | — | — | README, diagram, setup, env template, license, demo plan, current rules verification |
 
-The older 12-stage checklist above records Stage 3 schema completion only. Stage 4 policy, Stage 5 gateway, and Stage 7 full PayPal integration remain incomplete; the Day 2 Sandbox proof of concept does not complete them.
+The older 12-stage checklist above records Stage 3 schema and Stage 4 policy completion only. Stage 5 gateway and Stage 7 full PayPal integration remain incomplete; the Day 2 Sandbox proof of concept does not complete them.
 
 ## PayPal AI Hackathon Day 1
 
@@ -34,3 +34,7 @@ Day 3 is **COMPLETE** as a feasibility spike; see `03_mcp_feasibility.md`. Offic
 ## Payment schema Day 4
 
 Day 4 is **COMPLETE** as a payment data-contract stage; see `04_payment_schema.md`. Payment intents, claimed authorization records, exact money, and sanitized execution metadata are modeled separately from legacy traces. Parsing an authorization-shaped payload never proves buyer consent or permits execution. The existing REST and MCP spikes are unchanged. Stage 4 policy, Stage 5 gateway, and remaining integration work await approval. Final test, audit, commit, and push outcomes are reported in the Day 4 handoff.
+
+## Payment policy Day 5
+
+Day 5 is **COMPLETE** as a pure deterministic eligibility policy; see `05_payment_policy.md`. It obtains authorization only through an injected application-controlled repository interface and evaluates against an authenticated application context and trusted clock. It returns ALLOW, REVIEW, or BLOCK with safe reason codes and no payment side effects. The repository implementation, buyer approval, execution gateway, and replay controls remain future work. Final test, audit, commit, and push outcomes are reported in the Day 5 handoff. Await approval before Day 6.
