@@ -23,7 +23,7 @@ class SandboxPaymentAdapter(SandboxOnlyAdapter):
         amount = f"{intent.money.amount:.2f}"
         if intent.action == "create_order":
             result = self._client.create_order(intent.operation_id, amount, "USD")
-            if result["status"] != "CREATED":
+            if result["status"] not in {"CREATED", "PAYER_ACTION_REQUIRED"}:
                 raise SandboxError("Sandbox create outcome uncertain; reconcile before further action")
             return AdapterOutcome(status="ORDER_CREATED", provider_order_id=result["order_id"])
         if intent.action == "capture_order" and intent.target_order_id is not None:
@@ -54,7 +54,9 @@ class SandboxStatusVerifier(SandboxReadOnlyVerifier):
                 or order["amount"] is None or Decimal(order["amount"]) != Decimal(snapshot.amount_text)):
             raise SandboxError("Sandbox order binding mismatch during reconciliation")
         if snapshot.action == "create_order":
-            status = "COMPLETED" if order["status"] in {"CREATED", "APPROVED", "COMPLETED"} else "STILL_UNCERTAIN"
+            status = ("COMPLETED" if order["status"] in
+                      {"CREATED", "PAYER_ACTION_REQUIRED", "APPROVED", "COMPLETED"}
+                      else "STILL_UNCERTAIN")
             return VerifiedOutcome(status=status, provider_order_id=order_id, **common)
         capture_id = order["capture_id"] or snapshot.provider_capture_id
         if capture_id is None:

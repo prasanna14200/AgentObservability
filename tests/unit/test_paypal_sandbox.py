@@ -154,3 +154,12 @@ def test_approval_link_requires_sandbox_host():
     api, _ = client((200, bad))
     with pytest.raises(SandboxError, match="No validated"):
         api.approval_link("ORDER123")
+
+
+def test_approval_link_accepts_documented_payer_action_required_state():
+    pending = dict(ORDER, status="PAYER_ACTION_REQUIRED", links=[
+        {"rel": "payer-action", "href": "https://www.sandbox.paypal.com/checkoutnow?token=private"}
+    ])
+    api, fake = client((200, pending))
+    assert api.approval_link("ORDER123").startswith("https://www.sandbox.paypal.com/")
+    assert [call[0] for call in fake.calls] == ["POST", "GET"]

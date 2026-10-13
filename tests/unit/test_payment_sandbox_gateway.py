@@ -19,10 +19,11 @@ CONTEXT = AuthenticatedScope(principal_id="demo_user", scope_id="demo_scope")
 
 
 class SpyTransport:
-    def __init__(self, *, timeout_post=False, order_status="APPROVED"):
+    def __init__(self, *, timeout_post=False, order_status="APPROVED", create_status="CREATED"):
         self.calls = []
         self.timeout_post = timeout_post
         self.order_status = order_status
+        self.create_status = create_status
 
     def request(self, method, path, headers, body):
         self.calls.append((method, path, headers.get("PayPal-Request-Id")))
@@ -31,7 +32,7 @@ class SpyTransport:
         if method == "POST" and path == "/v2/checkout/orders":
             if self.timeout_post:
                 raise TimeoutError("spy timeout")
-            return 201, {"id": "ORDER123", "status": "CREATED"}
+            return 201, {"id": "ORDER123", "status": self.create_status}
         if method == "GET" and path == "/v2/checkout/orders/ORDER123":
             return 200, {"id": "ORDER123", "status": self.order_status, "purchase_units": [{
                 "amount": {"currency_code": "USD", "value": "1.00"},
@@ -118,6 +119,16 @@ def test_create_duplicate_has_one_payment_post_and_persisted_audit(tmp_path):
     assert first.provider_order_id == "ORDER123"
     assert store.audit_operation(intent.operation_id).provider_order_id == "ORDER123"
     assert len([c for c in spy.calls if c[0] == "POST" and c[1] != "/v1/oauth2/token"]) == 1
+
+
+def test_create_accepts_documented_payer_action_required_state(tmp_path):
+    db, store, spy, _, gateway = setup(tmp_path)
+    spy.create_status = "PAYER_ACTION_REQUIRED"
+    intent = make_intent()
+    seed(db, intent)
+    result = gateway.submit(intent, CONTEXT)
+    assert result.status == "COMPLETED" and result.provider_order_id == "ORDER123"
+    assert len([c for c in spy.calls if c[1] == "/v2/checkout/orders"]) == 1
 
 
 def test_capture_is_separately_authorized_and_has_distinct_key(tmp_path):

@@ -191,7 +191,8 @@ class PayPalSandboxClient:
 
     def approval_link(self, order_id: str) -> str:
         data = self._call("GET", f"/v2/checkout/orders/{_identifier(order_id, 'order ID')}")
-        if data.get("status") != "CREATED":
+        # PayPal can return either state while awaiting the buyer's action.
+        if data.get("status") not in {"CREATED", "PAYER_ACTION_REQUIRED"}:
             raise SandboxError("Order is not awaiting buyer approval")
         for link in data.get("links", []):
             if link.get("rel") not in {"approve", "payer-action"}:

@@ -58,7 +58,18 @@ def main(argv: list[str] | None = None) -> int:
             audit = store.audit_operation(args.operation_id)
             if audit is None or audit.state != "COMPLETED" or audit.provider_order_id is None:
                 raise SandboxError("A completed create operation is required")
-            webbrowser.open(client.approval_link(audit.provider_order_id))
+            try:
+                link = client.approval_link(audit.provider_order_id)
+            except SandboxError as exc:
+                # Only these exact, locally defined categories may reach stdout.
+                if str(exc) == "Order is not awaiting buyer approval":
+                    print("Approval unavailable: order is not awaiting buyer action. Run reconcile.")
+                    return 2
+                if str(exc) == "No validated Sandbox buyer approval link found":
+                    print("Approval unavailable: no validated Sandbox link was returned. Run reconcile.")
+                    return 2
+                raise
+            webbrowser.open(link)
             print("Opened the validated Sandbox approval page; buyer approval is manual.")
             return 0
 
