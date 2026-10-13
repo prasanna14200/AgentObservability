@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import webbrowser
 
@@ -17,7 +18,7 @@ from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, SandboxStatusVerifier  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SQLiteReconciler  # noqa: E402
 from agentsentinel.paypal_sandbox import (  # noqa: E402
-    PayPalSandboxClient, SandboxConfig, SandboxError, amount_usd, read_local_env,
+    PayPalSandboxClient, SandboxConfig, SandboxError, UncertainOutcome, amount_usd, read_local_env,
 )
 
 
@@ -34,6 +35,29 @@ def _safe_result(result, audit):
         "capture_id": audit.provider_capture_id if audit else None,
         "audit_state": audit.state if audit else None,
     }
+
+
+def _safe_failure_code(exc: Exception) -> str:
+    """Report only locally defined categories; provider bodies and exception text stay private."""
+    if isinstance(exc, UncertainOutcome):
+        return "NETWORK_OUTCOME_UNKNOWN"
+    if isinstance(exc, SandboxError):
+        match = re.fullmatch(r"Sandbox (OAuth failed|GET request failed|POST request failed) \(HTTP ([1-5][0-9]{2})\)", str(exc))
+        if match:
+            operation = {"OAuth failed": "OAUTH", "GET request failed": "GET",
+                         "POST request failed": "POST"}[match.group(1)]
+            return f"{operation}_HTTP_{match.group(2)}"
+        if str(exc) in {"PayPal returned invalid JSON", "PayPal returned an invalid response shape",
+                        "PayPal response exceeded size limit"}:
+            return "INVALID_PROVIDER_RESPONSE"
+        if str(exc) in {"PAYPAL_ENVIRONMENT must be sandbox",
+                        "Sandbox client ID, secret, and merchant ID are required in ignored .env",
+                        "Invalid Sandbox merchant ID"}:
+            return "SANDBOX_CONFIGURATION_INVALID"
+        return "SANDBOX_OPERATION_UNAVAILABLE"
+    if isinstance(exc, ValueError):
+        return "INVALID_INPUT_OR_RESPONSE"
+    return "LOCAL_OR_UNEXPECTED_ERROR"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -69,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
                     print("Approval unavailable: no validated Sandbox link was returned. Run reconcile.")
                     return 2
                 raise
-            webbrowser.open(link)
+            if not webbrowser.open(link):
+                print("Browser launch was not confirmed; no approval action was performed by this script.")
+                return 2
             print("Opened the validated Sandbox approval page; buyer approval is manual.")
             return 0
 
@@ -114,9 +140,9 @@ def main(argv: list[str] | None = None) -> int:
         result = TrustedGatewayEntryPoint(gateway, DemoSession()).submit(intent)
         print(json.dumps(_safe_result(result, store.audit_operation(intent.operation_id)), sort_keys=True))
         return 0 if result.status == "COMPLETED" else 2
-    except Exception:
-        # Provider bodies, URLs, credentials, and local SQL errors never reach stdout.
-        print("Sandbox demo could not complete; inspect sanitized operation state with reconcile.")
+    except Exception as exc:
+        # Never echo the raw exception; custom transports could contain secrets.
+        print(f"Sandbox demo stopped [{_safe_failure_code(exc)}]. No automatic retry.")
         return 2
 
 

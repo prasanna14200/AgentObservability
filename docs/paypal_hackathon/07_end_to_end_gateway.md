@@ -25,7 +25,7 @@ python scripts/demo_purchase.py open-approval --operation-id demo_create_001
 
 The first command prints a sanitized `ALLOW`, `COMPLETED`, order ID, and audit state if successful. The second opens a validated Sandbox buyer page without printing its URL. Sign in as the Sandbox buyer and approve manually. Then copy the order ID from the first command into these commands:
 
-If `open-approval` fails, run `reconcile` for the create operation and check its sanitized `order_status`. PayPal documents both `CREATED` and `PAYER_ACTION_REQUIRED` as pending buyer action; the helper accepts both. Do not create a replacement order or attempt capture until the existing order is understood.
+If `open-approval` fails, run `reconcile` for the create operation and check its sanitized `order_status` or failure code. PayPal documents both `CREATED` and `PAYER_ACTION_REQUIRED` as pending buyer action; the helper accepts both. `OAUTH_HTTP_*`, `GET_HTTP_*`, and `NETWORK_OUTCOME_UNKNOWN` identify a failed read without printing provider data. Do not create a replacement order or attempt capture until the existing order is understood.
 
 ```powershell
 python scripts/demo_purchase.py capture --operation-id demo_capture_001 --order-id ORDER_ID_FROM_CREATE --amount 1.00
