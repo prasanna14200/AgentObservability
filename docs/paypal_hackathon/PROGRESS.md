@@ -11,13 +11,13 @@ Updated: 2026-10-13. The statuses below refer to the **new 12 stages**, not the 
 | 5 | Pre-execution safety gateway | PROTOTYPE COMPLETE (Day 6) | Payment schema and policy; test conventions | `src/agentsentinel/payment_gateway.py`; `tests/unit/test_payment_gateway.py`; `06_safety_gateway.md`; this file | Fake-only gateway and single-process replay/concurrency tests; see Day 6 handoff | Durable atomic authorization/operation store and deployment isolation before real execution |
 | 6 | AI purchase assistant | NOT STARTED | Trace identity and gateway interface | — | — | Request-to-proposal agent with no payment authority |
 | 7 | PayPal Sandbox | NOT STARTED | Gateway and policy | — | — | Sandbox order, buyer approval, capture integration |
-| 8 | Transaction reliability | NOT STARTED | Operation records from Stages 4–7 | — | — | Idempotency, reconciliation, timeout handling, verified webhooks if used |
+| 8 | Transaction reliability | PARTIAL (Day 7 local prototype) | Day 5 policy and Day 6 gateway | `src/agentsentinel/payment_sqlite.py`; `tests/unit/test_payment_sqlite.py`; `07_durable_payment_safety.md`; this file | SQLite reservation, atomic claim, restart and fake reconciliation tests; see Day 7 handoff | Trusted provider verification, real execution integration, deployment controls; webhooks only if used |
 | 9 | Human approval | NOT STARTED | REVIEW decision and operation records | — | — | Pending queue, approve/reject, expiry, policy recheck |
 | 10 | Dashboard | NOT STARTED | Traces, detector scores, decisions, payment outcomes | — | — | Simple usable end-to-end interface |
 | 11 | End-to-end tests | NOT STARTED | All implemented components | — | — | Scenarios, evaluation report, known limitations |
 | 12 | Submission preparation | NOT STARTED | Docs and system artifacts | — | — | README, diagram, setup, env template, license, demo plan, current rules verification |
 
-The older 12-stage checklist above records Stage 3 schema, Stage 4 policy, and a Stage 5 fake-only gateway prototype. Durable execution controls and Stage 7 full PayPal integration remain incomplete; the Day 2 Sandbox proof of concept does not complete them.
+The older 12-stage checklist above records Stage 3 schema, Stage 4 policy, a Stage 5 fake-only gateway prototype, and partial Stage 8 local reliability work. Stage 7 full PayPal integration remains incomplete; the Day 2 Sandbox proof of concept does not complete it.
 
 ## PayPal AI Hackathon Day 1
 
@@ -42,3 +42,7 @@ Day 5 is **COMPLETE** as a pure deterministic eligibility policy; see `05_paymen
 ## Safety gateway Day 6
 
 Day 6 is **COMPLETE as a fake-only gateway prototype**; see `06_safety_gateway.md`. The gateway reserves operations atomically within one process, evaluates the Day 5 policy, stops BLOCK and REVIEW, requires an atomic authorization-consumer claim for ALLOW, and then invokes only a marked fake adapter. Duplicate, concurrent, and uncertain outcomes do not trigger another adapter call. Real payment execution is disabled because the required durable atomic store and deployment isolation do not exist. Final test, audit, commit, and push outcomes are recorded in the Day 6 handoff. Await approval before Day 7.
+
+## Durable payment safety Day 7
+
+Day 7 is **COMPLETE as a local SQLite prototype**; see `07_durable_payment_safety.md`. Operations and application-held authorization records persist across repository reinitialization. SQLite transactions coordinate duplicate reservation and one-time authorization consumption with a persistent `CLAIMED` recovery state. Ambiguous operations require fake-verifier reconciliation and never automatically retry. A narrow trusted-context facade keeps scope construction outside the AI proposal. There is no public authorization issuance API, live PayPal call, or real adapter path. Full production durability, trusted buyer issuance, provider verification, and deployment isolation remain open. Final test, audit, commit, and push outcomes are recorded in the Day 7 handoff. Await approval before Day 8.

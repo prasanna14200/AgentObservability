@@ -18,7 +18,7 @@ GatewayReason = Literal[
     "POLICY_BLOCK", "POLICY_REVIEW", "POLICY_FAILURE", "EXECUTED_FAKE",
     "OPERATION_CONFLICT", "OPERATION_RESERVATION_FAILED", "OPERATION_IN_PROGRESS",
     "AUTHORIZATION_CONSUMPTION_FAILED", "EXECUTION_DISABLED", "PROVIDER_OUTCOME_UNCERTAIN",
-    "OPERATION_FINALIZATION_FAILED",
+    "OPERATION_FINALIZATION_FAILED", "RECONCILIATION_REQUIRED", "VERIFIED_COMPLETED", "VERIFIED_NO_PAYMENT",
 ]
 
 
@@ -62,7 +62,7 @@ class AuthorizationConsumer(Protocol):
 
 @dataclass(frozen=True)
 class Reservation:
-    state: Literal["NEW", "RESERVED", "COMPLETED", "REJECTED", "REVIEW_REQUIRED", "UNCERTAIN", "CONFLICT"]
+    state: Literal["NEW", "RESERVED", "CLAIMED", "COMPLETED", "REJECTED", "REVIEW_REQUIRED", "UNCERTAIN", "CONFLICT"]
     result: GatewayResult | None = None
 
 
@@ -131,7 +131,10 @@ class PaymentGateway:
         context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
         fingerprint = _fingerprint(intent, context)
         try:
-            reservation = self._operations.reserve(intent.operation_id, fingerprint)
+            # Durable stores can persist the bounded intent/context fields needed for recovery.
+            reserve_intent = getattr(self._operations, "reserve_intent", None)
+            reservation = (reserve_intent(intent, context, fingerprint) if reserve_intent is not None
+                           else self._operations.reserve(intent.operation_id, fingerprint))
         except Exception:
             return self._result(intent, None, "REJECTED", "OPERATION_RESERVATION_FAILED")
 
@@ -139,6 +142,8 @@ class PaymentGateway:
             return self._result(intent, None, "REJECTED", "OPERATION_CONFLICT")
         if reservation.state == "RESERVED":
             return self._result(intent, None, "IN_PROGRESS", "OPERATION_IN_PROGRESS")
+        if reservation.state == "CLAIMED":
+            return self._result(intent, None, "UNCERTAIN", "RECONCILIATION_REQUIRED")
         if reservation.state != "NEW":
             if reservation.result is None:
                 return self._result(intent, None, "UNCERTAIN", "OPERATION_FINALIZATION_FAILED")
@@ -189,3 +194,20 @@ class PaymentGateway:
         intent: PaymentIntent, decision: PolicyDecision | None, status: GatewayStatus, reason: GatewayReason
     ) -> GatewayResult:
         return GatewayResult(operation_id=intent.operation_id, decision=decision, status=status, reason_codes=(reason,))
+
+
+class AuthenticatedContextProvider(Protocol):
+    """Trusted application boundary derives identity from its authenticated session."""
+
+    def current_context(self) -> AuthenticatedScope: ...
+
+
+class TrustedGatewayEntryPoint:
+    """Narrow facade: AI-facing callers can supply only an intent, never scope."""
+
+    def __init__(self, gateway: PaymentGateway, context_provider: AuthenticatedContextProvider) -> None:
+        self._gateway = gateway
+        self._context_provider = context_provider
+
+    def submit(self, intent: PaymentIntent) -> GatewayResult:
+        return self._gateway.submit(intent, self._context_provider.current_context())
