@@ -26,6 +26,7 @@ ReasonCode = Literal[
     "AUTHORIZATION_CURRENCY_MISMATCH", "AUTHORIZATION_ACTION_MISMATCH",
     "AUTHORIZATION_TARGET_MISMATCH", "AUTHORIZATION_INACTIVE",
     "AUTHORIZATION_NOT_YET_VALID", "AUTHORIZATION_EXPIRED",
+    "REVIEW_ADVISORY_SIGNAL",
 ]
 
 
@@ -103,10 +104,15 @@ class PaymentPolicy:
         self._config = config
         self._clock = clock
 
-    def evaluate(self, intent: PaymentIntent, context: AuthenticatedScope) -> PolicyDecision:
+    def evaluate(
+        self, intent: PaymentIntent, context: AuthenticatedScope,
+        *, advisory_signals: tuple[Literal["request_review"], ...] = (),
+    ) -> PolicyDecision:
         """No authorization payload parameter; caller must control context and repository."""
         if not isinstance(intent, PaymentIntent) or not isinstance(context, AuthenticatedScope):
             raise TypeError("validated intent and authenticated context are required")
+        if not isinstance(advisory_signals, tuple) or any(signal != "request_review" for signal in advisory_signals):
+            raise ValueError("unsupported advisory signal")
         now = self._clock()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("trusted clock must return a timezone-aware datetime; no decision issued")
@@ -146,8 +152,13 @@ class PaymentPolicy:
         if hard:
             outcome: Outcome = "BLOCK"
             reasons: tuple[ReasonCode, ...] = tuple(hard)
-        elif intent.money.amount > self._config.review_above_usd:
-            outcome, reasons = "REVIEW", ("REVIEW_AMOUNT_THRESHOLD",)
+        elif intent.money.amount > self._config.review_above_usd or advisory_signals:
+            review_reasons: list[ReasonCode] = []
+            if intent.money.amount > self._config.review_above_usd:
+                review_reasons.append("REVIEW_AMOUNT_THRESHOLD")
+            if advisory_signals:
+                review_reasons.append("REVIEW_ADVISORY_SIGNAL")
+            outcome, reasons = "REVIEW", tuple(review_reasons)
         else:
             outcome, reasons = "ALLOW", ("ELIGIBLE",)
 

@@ -1,4 +1,4 @@
-"""Local SQLite payment safety prototype; no issuance or live provider access."""
+"""Local SQLite payment safety store with durable operation and claim transitions."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ class ReconciliationSnapshot(PaymentModel):
     operation_id: str
     state: Literal["RESERVED", "CLAIMED", "UNCERTAIN"]
     action: Literal["create_order", "capture_order"]
+    merchant_id: str
+    amount_text: str
+    currency: str
     target_order_id: str | None
     attempt_id: str | None
     idempotency_key: str | None
@@ -67,12 +70,31 @@ class VerifiedOutcome(PaymentModel):
         return self
 
 
+class OperationAudit(PaymentModel):
+    """Bounded status view for the trusted demo CLI; no request body or credentials."""
+
+    operation_id: str
+    state: Literal["RESERVED", "CLAIMED", "COMPLETED", "REJECTED", "REVIEW_REQUIRED", "UNCERTAIN"]
+    attempt_id: str | None
+    idempotency_key: str | None
+    provider_order_id: str | None
+    provider_capture_id: str | None
+
+
 class OutcomeVerifier(Protocol):
     def verify(self, snapshot: ReconciliationSnapshot) -> VerifiedOutcome: ...
 
 
 class TestOnlyOutcomeVerifier(ABC):
-    """Only fake verifier implementations may run during Day 7."""
+    """Fake verifier marker for offline tests."""
+
+    @abstractmethod
+    def verify(self, snapshot: ReconciliationSnapshot) -> VerifiedOutcome:
+        ...
+
+
+class SandboxReadOnlyVerifier(ABC):
+    """Trusted application verifier restricted to read-only Sandbox status calls."""
 
     @abstractmethod
     def verify(self, snapshot: ReconciliationSnapshot) -> VerifiedOutcome:
@@ -280,7 +302,7 @@ class SQLitePaymentStore:
             raise StoreUnavailable("authorization claim unavailable") from None
 
     def finish(self, operation_id: str, fingerprint: str, result: GatewayResult) -> None:
-        """Commit a sanitized terminal result after the fake adapter returns."""
+        """Commit a sanitized terminal result after an adapter returns."""
         try:
             now = self._now()
             with self._write() as conn:
@@ -291,8 +313,11 @@ class SQLitePaymentStore:
                         or (row["state"] == "CLAIMED" and result.status not in {"COMPLETED", "UNCERTAIN"})
                         or row["state"] not in {"RESERVED", "CLAIMED"}):
                     raise StoreUnavailable("invalid operation transition")
-                conn.execute("UPDATE operations SET state=?,result_json=?,updated_at=? WHERE operation_id=?",
-                             (result.status, result.model_dump_json(), now.isoformat(), operation_id))
+                conn.execute("""UPDATE operations SET state=?,result_json=?,
+                    provider_order_id=COALESCE(?,provider_order_id),
+                    provider_capture_id=COALESCE(?,provider_capture_id),updated_at=? WHERE operation_id=?""",
+                    (result.status, result.model_dump_json(), result.provider_order_id,
+                     result.provider_capture_id, now.isoformat(), operation_id))
                 self._event(conn, operation_id, row["state"], result.status, "finish", now)
         except Exception:
             raise StoreUnavailable("operation finalization unavailable") from None
@@ -308,6 +333,17 @@ class SQLitePaymentStore:
         except Exception:
             raise StoreUnavailable("authorization revocation unavailable") from None
 
+    def audit_operation(self, operation_id: str) -> OperationAudit | None:
+        """Read-only safe operation view; application must control who can call it."""
+        try:
+            with closing(self._connect()) as conn:
+                row = conn.execute("""SELECT operation_id,state,attempt_id,idempotency_key,
+                    provider_order_id,provider_capture_id FROM operations WHERE operation_id=?""",
+                    (_check_id(operation_id, "operation identifier"),)).fetchone()
+            return OperationAudit.model_validate(dict(row)) if row else None
+        except Exception:
+            raise StoreUnavailable("operation audit unavailable") from None
+
     def _snapshot(self, operation_id: str) -> ReconciliationSnapshot:
         try:
             with closing(self._connect()) as conn:
@@ -316,6 +352,7 @@ class SQLitePaymentStore:
                 raise StoreUnavailable("operation is not reconcilable")
             return ReconciliationSnapshot(
                 operation_id=operation_id, state=row["state"], action=row["action"],
+                merchant_id=row["merchant_id"], amount_text=row["amount_text"], currency=row["currency"],
                 target_order_id=row["target_order_id"],
                 attempt_id=row["attempt_id"], idempotency_key=row["idempotency_key"],
                 provider_order_id=row["provider_order_id"], provider_capture_id=row["provider_capture_id"],
@@ -368,11 +405,11 @@ class SQLitePaymentStore:
 
 
 class SQLiteReconciler:
-    """Trusted app component; calls a fake verifier only in Day 7."""
+    """Trusted app component; accepts only fake or read-only Sandbox verifiers."""
 
     def __init__(self, store: SQLitePaymentStore, verifier: OutcomeVerifier) -> None:
-        if not isinstance(verifier, TestOnlyOutcomeVerifier):
-            raise TypeError("Day 7 requires a marked fake verifier")
+        if not isinstance(verifier, (TestOnlyOutcomeVerifier, SandboxReadOnlyVerifier)):
+            raise TypeError("reconciliation requires a trusted verifier")
         self._store = store
         self._verifier = verifier
 

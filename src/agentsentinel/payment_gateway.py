@@ -1,4 +1,4 @@
-"""Day 6 gateway prototype: fake-adapter execution only, no live payments."""
+"""Pre-execution gateway with fake tests and explicit manual Sandbox execution."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from agentsentinel.schema.payment import PaymentIntent, PaymentModel, _check_id
 
 GatewayStatus = Literal["REJECTED", "REVIEW_REQUIRED", "IN_PROGRESS", "COMPLETED", "UNCERTAIN"]
 GatewayReason = Literal[
-    "POLICY_BLOCK", "POLICY_REVIEW", "POLICY_FAILURE", "EXECUTED_FAKE",
+    "POLICY_BLOCK", "POLICY_REVIEW", "POLICY_FAILURE", "EXECUTED_FAKE", "EXECUTED_SANDBOX",
     "OPERATION_CONFLICT", "OPERATION_RESERVATION_FAILED", "OPERATION_IN_PROGRESS",
     "AUTHORIZATION_CONSUMPTION_FAILED", "EXECUTION_DISABLED", "PROVIDER_OUTCOME_UNCERTAIN",
     "OPERATION_FINALIZATION_FAILED", "RECONCILIATION_REQUIRED", "VERIFIED_COMPLETED", "VERIFIED_NO_PAYMENT",
@@ -29,17 +29,31 @@ class GatewayResult(PaymentModel):
     decision: PolicyDecision | None
     status: GatewayStatus
     reason_codes: tuple[GatewayReason, ...]
+    provider_order_id: str | None = None
+    provider_capture_id: str | None = None
 
     @field_validator("operation_id")
     @classmethod
     def valid_operation_id(cls, value: str) -> str:
         return _check_id(value, "operation identifier")
 
+    @field_validator("provider_order_id", "provider_capture_id")
+    @classmethod
+    def valid_provider_id(cls, value: str | None) -> str | None:
+        return None if value is None else _check_id(value, "provider identifier")
+
 
 class AdapterOutcome(PaymentModel):
-    """Fake adapter output contains no raw provider response or payment instrument."""
+    """Sanitized adapter output; never a raw provider response."""
 
-    status: Literal["COMPLETED"]
+    status: Literal["COMPLETED", "ORDER_CREATED", "CAPTURE_COMPLETED"]
+    provider_order_id: str | None = None
+    provider_capture_id: str | None = None
+
+    @field_validator("provider_order_id", "provider_capture_id")
+    @classmethod
+    def valid_provider_id(cls, value: str | None) -> str | None:
+        return None if value is None else _check_id(value, "provider identifier")
 
 
 class ProtectedAdapter(Protocol):
@@ -48,6 +62,14 @@ class ProtectedAdapter(Protocol):
 
 class TestOnlyAdapter(ABC):
     """Explicit Day 6 fake marker. Python inheritance is not a deployment boundary."""
+
+    @abstractmethod
+    def execute(self, intent: PaymentIntent) -> AdapterOutcome:
+        ...
+
+
+class SandboxOnlyAdapter(ABC):
+    """Explicit manual Sandbox adapter marker; never grants agent access to credentials."""
 
     @abstractmethod
     def execute(self, intent: PaymentIntent) -> AdapterOutcome:
@@ -116,13 +138,18 @@ class PaymentGateway:
         operations: OperationStore,
         consumer: AuthorizationConsumer,
         adapter: ProtectedAdapter | None = None,
+        *, enable_sandbox_execution: bool = False,
     ) -> None:
         self._policy = policy
         self._operations = operations
         self._consumer = consumer
         self._adapter = adapter
+        self._enable_sandbox_execution = enable_sandbox_execution
 
-    def submit(self, intent: PaymentIntent, context: AuthenticatedScope) -> GatewayResult:
+    def submit(
+        self, intent: PaymentIntent, context: AuthenticatedScope,
+        *, advisory_signals: tuple[Literal["request_review"], ...] = (),
+    ) -> GatewayResult:
         """Context must originate at an authenticated app boundary, never from the AI."""
         if not isinstance(intent, PaymentIntent) or not isinstance(context, AuthenticatedScope):
             raise TypeError("validated intent and trusted application context are required")
@@ -150,7 +177,7 @@ class PaymentGateway:
             return reservation.result
 
         try:
-            decision = self._policy.evaluate(intent, context)
+            decision = self._policy.evaluate(intent, context, advisory_signals=advisory_signals)
         except Exception:
             return self._finalize(intent, fingerprint, None, "REJECTED", "POLICY_FAILURE")
         if decision.outcome == "BLOCK":
@@ -158,8 +185,9 @@ class PaymentGateway:
         if decision.outcome == "REVIEW":
             return self._finalize(intent, fingerprint, decision, "REVIEW_REQUIRED", "POLICY_REVIEW")
 
-        # Day 6 cannot connect a real adapter: only an explicitly marked fake may execute.
-        if self._adapter is None or not isinstance(self._adapter, TestOnlyAdapter):
+        # Real Sandbox execution requires an explicit trusted application opt-in.
+        sandbox_enabled = self._enable_sandbox_execution and isinstance(self._adapter, SandboxOnlyAdapter)
+        if self._adapter is None or not (isinstance(self._adapter, TestOnlyAdapter) or sandbox_enabled):
             return self._finalize(intent, fingerprint, decision, "REJECTED", "EXECUTION_DISABLED")
         try:
             consumed = self._consumer.claim(context, intent, decision)
@@ -170,18 +198,26 @@ class PaymentGateway:
 
         try:
             outcome = self._adapter.execute(intent)
-            if not isinstance(outcome, AdapterOutcome) or outcome.status != "COMPLETED":
+            if not isinstance(outcome, AdapterOutcome):
+                raise ValueError("fake adapter returned invalid outcome")
+            if sandbox_enabled:
+                expected = "ORDER_CREATED" if intent.action == "create_order" else "CAPTURE_COMPLETED"
+                if (outcome.status != expected or outcome.provider_order_id is None
+                        or (intent.action == "capture_order" and outcome.provider_capture_id is None)):
+                    raise ValueError("Sandbox adapter returned an uncertain outcome")
+            elif outcome.status != "COMPLETED":
                 raise ValueError("fake adapter returned invalid outcome")
         except Exception:
             # Timeout may occur after a provider accepted a request. Never retry here.
             return self._finalize(intent, fingerprint, decision, "UNCERTAIN", "PROVIDER_OUTCOME_UNCERTAIN")
-        return self._finalize(intent, fingerprint, decision, "COMPLETED", "EXECUTED_FAKE")
+        reason = "EXECUTED_SANDBOX" if sandbox_enabled else "EXECUTED_FAKE"
+        return self._finalize(intent, fingerprint, decision, "COMPLETED", reason, outcome=outcome)
 
     def _finalize(
         self, intent: PaymentIntent, fingerprint: str, decision: PolicyDecision | None,
-        status: GatewayStatus, reason: GatewayReason,
+        status: GatewayStatus, reason: GatewayReason, *, outcome: AdapterOutcome | None = None,
     ) -> GatewayResult:
-        result = self._result(intent, decision, status, reason)
+        result = self._result(intent, decision, status, reason, outcome=outcome)
         try:
             self._operations.finish(intent.operation_id, fingerprint, result)
         except Exception:
@@ -191,9 +227,14 @@ class PaymentGateway:
 
     @staticmethod
     def _result(
-        intent: PaymentIntent, decision: PolicyDecision | None, status: GatewayStatus, reason: GatewayReason
+        intent: PaymentIntent, decision: PolicyDecision | None, status: GatewayStatus, reason: GatewayReason,
+        *, outcome: AdapterOutcome | None = None,
     ) -> GatewayResult:
-        return GatewayResult(operation_id=intent.operation_id, decision=decision, status=status, reason_codes=(reason,))
+        return GatewayResult(
+            operation_id=intent.operation_id, decision=decision, status=status, reason_codes=(reason,),
+            provider_order_id=outcome.provider_order_id if outcome else None,
+            provider_capture_id=outcome.provider_capture_id if outcome else None,
+        )
 
 
 class AuthenticatedContextProvider(Protocol):
@@ -209,5 +250,9 @@ class TrustedGatewayEntryPoint:
         self._gateway = gateway
         self._context_provider = context_provider
 
-    def submit(self, intent: PaymentIntent) -> GatewayResult:
-        return self._gateway.submit(intent, self._context_provider.current_context())
+    def submit(
+        self, intent: PaymentIntent, *, advisory_signals: tuple[Literal["request_review"], ...] = (),
+    ) -> GatewayResult:
+        return self._gateway.submit(
+            intent, self._context_provider.current_context(), advisory_signals=advisory_signals
+        )
