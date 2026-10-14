@@ -6,8 +6,10 @@ import hashlib
 import re
 import sqlite3
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Callable, Iterator, Literal, Protocol
 
@@ -21,6 +23,25 @@ from agentsentinel.schema.payment import Money, PaymentAuthorization, PaymentInt
 
 class StoreUnavailable(RuntimeError):
     """Safe storage failure; never includes SQL or stored values."""
+
+
+@dataclass(frozen=True)
+class SafetyLimits:
+    """Trusted application configuration; attempt counts and spend live in SQLite."""
+
+    max_attempts_per_operation: int = 10
+    max_attempts_per_trace: int = 100
+    daily_spend_usd: Decimal = Decimal("100.00")
+    merchant_daily_spend_usd: Decimal = Decimal("50.00")
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in
+               (self.max_attempts_per_operation, self.max_attempts_per_trace)):
+            raise ValueError("attempt limits must be positive integers")
+        for value in (self.daily_spend_usd, self.merchant_daily_spend_usd):
+            if (not isinstance(value, Decimal) or not value.is_finite() or value <= 0
+                    or -value.as_tuple().exponent > 2):
+                raise ValueError("budget limits must be positive exact USD cents")
 
 
 class ReconciliationSnapshot(PaymentModel):
@@ -111,11 +132,15 @@ class SQLitePaymentStore:
         self, path: Path, *, trusted_issuer_id: str,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         timeout: float = 1.0,
+        limits: SafetyLimits = SafetyLimits(),
     ) -> None:
         self.path = Path(path)
         self.trusted_issuer_id = _check_id(trusted_issuer_id, "trusted issuer")
         self.clock = clock
         self.timeout = timeout
+        if not isinstance(limits, SafetyLimits):
+            raise ValueError("trusted safety limits required")
+        self.limits = limits
         if str(path) == ":memory:" or timeout < 0:
             raise ValueError("a local file path and nonnegative timeout are required")
         self._initialize()
@@ -176,6 +201,11 @@ class SQLitePaymentStore:
                         from_state TEXT, to_state TEXT NOT NULL,
                         event_type TEXT NOT NULL, occurred_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS operation_attempts (
+                        operation_id TEXT NOT NULL, trace_id TEXT NOT NULL,
+                        count INTEGER NOT NULL CHECK(count > 0),
+                        PRIMARY KEY(operation_id,trace_id)
+                    );
                 """)
         except sqlite3.Error:
             raise StoreUnavailable("payment store initialization unavailable") from None
@@ -205,6 +235,18 @@ class SQLitePaymentStore:
         try:
             now = self._now()
             with self._write() as conn:
+                # BEGIN IMMEDIATE serializes the attempt, budget check, and reservation.
+                conn.execute("""INSERT INTO operation_attempts(operation_id,trace_id,count) VALUES(?,?,1)
+                    ON CONFLICT(operation_id,trace_id) DO UPDATE SET count=count+1""",
+                             (intent.operation_id, intent.trace_id))
+                operation_count = conn.execute("SELECT SUM(count) FROM operation_attempts WHERE operation_id=?",
+                                               (intent.operation_id,)).fetchone()[0]
+                trace_count = conn.execute("SELECT SUM(count) FROM operation_attempts WHERE trace_id=?",
+                                           (intent.trace_id,)).fetchone()[0]
+                if operation_count > self.limits.max_attempts_per_operation:
+                    return Reservation("SAFETY_BLOCK", guard_reason="OPERATION_LOOP_LIMIT")
+                if trace_count > self.limits.max_attempts_per_trace:
+                    return Reservation("SAFETY_BLOCK", guard_reason="TRACE_LOOP_LIMIT")
                 row = conn.execute("SELECT fingerprint,state,result_json FROM operations WHERE operation_id=?",
                                    (intent.operation_id,)).fetchone()
                 if row is not None:
@@ -212,6 +254,28 @@ class SQLitePaymentStore:
                         return Reservation("CONFLICT")
                     result = GatewayResult.model_validate_json(row["result_json"]) if row["result_json"] else None
                     return Reservation(row["state"], result)
+                if intent.action == "capture_order":
+                    day = now.astimezone(timezone.utc).date()
+                    spent_daily = spent_merchant = 0
+                    rows = conn.execute("""SELECT o.merchant_id,o.amount_text,o.state,e.occurred_at
+                        FROM operations o JOIN operation_events e ON e.operation_id=o.operation_id
+                        AND e.event_type='reserve' WHERE o.action='capture_order'
+                        AND o.state IN ('RESERVED','CLAIMED','UNCERTAIN','COMPLETED')""").fetchall()
+                    for prior in rows:
+                        prior_day = datetime.fromisoformat(prior["occurred_at"]).astimezone(timezone.utc).date()
+                        # An unresolved reservation from a prior day may still settle
+                        # today, so hold its amount until reconciliation releases it.
+                        if prior_day != day and prior["state"] == "COMPLETED":
+                            continue
+                        cents = int(Decimal(prior["amount_text"]) * 100)
+                        spent_daily += cents
+                        if prior["merchant_id"] == intent.merchant_id:
+                            spent_merchant += cents
+                    requested = int(intent.money.amount * 100)
+                    if spent_daily + requested > int(self.limits.daily_spend_usd * 100):
+                        return Reservation("SAFETY_BLOCK", guard_reason="DAILY_BUDGET_LIMIT")
+                    if spent_merchant + requested > int(self.limits.merchant_daily_spend_usd * 100):
+                        return Reservation("SAFETY_BLOCK", guard_reason="MERCHANT_BUDGET_LIMIT")
                 conn.execute("""INSERT INTO operations
                     (operation_id,fingerprint,principal_id,scope_id,intent_id,merchant_id,amount_text,currency,
                      action,target_order_id,state,provider_order_id,updated_at)

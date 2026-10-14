@@ -1,6 +1,6 @@
 # Day 7: manual Sandbox walking skeleton
 
-Verified locally 2026-10-14. The Day 7 gateway created Sandbox orders; one later became inaccessible through GET and a separate order reached `APPROVED`. No Day 7 capture has been verified. The successful Day 2 payment was a separate REST spike.
+Verified locally 2026-10-14. The Day 7 gateway created Sandbox orders; order A later became inaccessible through GET. Order B reached `APPROVED`, and separate read-only order and capture GETs verified its `COMPLETED` capture with matching USD amount and merchant. The successful Day 2 payment was a separate REST spike.
 
 ```text
 Scripted proposal → trusted demo session + interactive user confirmation

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -66,7 +67,7 @@ def seed(db, intent, *, amount=None, merchant=None):
         action=intent.action, target_order_id=intent.target_order_id,
         issued_at=now - timedelta(minutes=1), expires_at=now + timedelta(minutes=5),
         status="issued", record_origin="application_issued")
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("""INSERT INTO authorizations
             (authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,
              amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin)

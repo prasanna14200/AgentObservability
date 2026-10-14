@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from threading import Lock
@@ -10,7 +11,7 @@ from typing import Literal, Protocol
 
 from pydantic import field_validator
 
-from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy, PolicyDecision
+from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy, PolicyDecision, PolicyAudit, POLICY_VERSION
 from agentsentinel.schema.payment import PaymentIntent, PaymentModel, _check_id
 
 GatewayStatus = Literal["REJECTED", "REVIEW_REQUIRED", "IN_PROGRESS", "COMPLETED", "UNCERTAIN"]
@@ -84,8 +85,9 @@ class AuthorizationConsumer(Protocol):
 
 @dataclass(frozen=True)
 class Reservation:
-    state: Literal["NEW", "RESERVED", "CLAIMED", "COMPLETED", "REJECTED", "REVIEW_REQUIRED", "UNCERTAIN", "CONFLICT"]
+    state: Literal["NEW", "RESERVED", "CLAIMED", "COMPLETED", "REJECTED", "REVIEW_REQUIRED", "UNCERTAIN", "CONFLICT", "SAFETY_BLOCK"]
     result: GatewayResult | None = None
+    guard_reason: Literal["OPERATION_LOOP_LIMIT", "TRACE_LOOP_LIMIT", "DAILY_BUDGET_LIMIT", "MERCHANT_BUDGET_LIMIT"] | None = None
 
 
 class OperationStore(Protocol):
@@ -167,6 +169,20 @@ class PaymentGateway:
 
         if reservation.state == "CONFLICT":
             return self._result(intent, None, "REJECTED", "OPERATION_CONFLICT")
+        if reservation.state == "SAFETY_BLOCK":
+            kind = "LOOP_LIMIT_EXCEEDED" if reservation.guard_reason in {"OPERATION_LOOP_LIMIT", "TRACE_LOOP_LIMIT"} else "BUDGET_EXCEEDED"
+            if reservation.guard_reason is None:
+                return self._result(intent, None, "REJECTED", "OPERATION_RESERVATION_FAILED")
+            # A rejected pre-reservation attempt has no operation row to finalize.
+            decision = PolicyDecision(
+                decision_id="decision_" + hashlib.sha256(
+                    f"{intent.operation_id}:{reservation.guard_reason}".encode("ascii")
+                ).hexdigest()[:24], operation_id=intent.operation_id, outcome="BLOCK",
+                reason_codes=(kind, reservation.guard_reason), policy_version=POLICY_VERSION,
+                evaluated_at=datetime.now(timezone.utc),
+                audit_metadata=PolicyAudit(authorization_lookup="skipped"),
+            )
+            return self._result(intent, decision, "REJECTED", "POLICY_BLOCK")
         if reservation.state == "RESERVED":
             return self._result(intent, None, "IN_PROGRESS", "OPERATION_IN_PROGRESS")
         if reservation.state == "CLAIMED":
@@ -243,16 +259,24 @@ class AuthenticatedContextProvider(Protocol):
     def current_context(self) -> AuthenticatedScope: ...
 
 
+class AdvisorySignalProvider(Protocol):
+    """Internal-only source; its signals carry no authorization authority."""
+
+    def signals_for(self, intent: PaymentIntent, context: AuthenticatedScope) -> tuple[Literal["request_review"], ...]: ...
+
+
 class TrustedGatewayEntryPoint:
     """Narrow facade: AI-facing callers can supply only an intent, never scope."""
 
-    def __init__(self, gateway: PaymentGateway, context_provider: AuthenticatedContextProvider) -> None:
+    def __init__(self, gateway: PaymentGateway, context_provider: AuthenticatedContextProvider,
+                 advisory_provider: AdvisorySignalProvider | None = None) -> None:
         self._gateway = gateway
         self._context_provider = context_provider
+        self._advisory_provider = advisory_provider
 
-    def submit(
-        self, intent: PaymentIntent, *, advisory_signals: tuple[Literal["request_review"], ...] = (),
-    ) -> GatewayResult:
-        return self._gateway.submit(
-            intent, self._context_provider.current_context(), advisory_signals=advisory_signals
-        )
+    def submit(self, intent: PaymentIntent) -> GatewayResult:
+        # The agent-facing call has no signal argument. Only an injected internal
+        # provider may request escalation; policy still applies hard blocks first.
+        context = self._context_provider.current_context()
+        signals = self._advisory_provider.signals_for(intent, context) if self._advisory_provider else ()
+        return self._gateway.submit(intent, context, advisory_signals=signals)
