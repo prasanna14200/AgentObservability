@@ -1,6 +1,6 @@
 # Day 7: manual Sandbox walking skeleton
 
-Verified locally 2026-10-13. No live Sandbox request was made for this course correction. The successful Day 2 payment was a separate REST spike.
+Verified locally 2026-10-14. The Day 7 gateway created Sandbox orders; one later became inaccessible through GET and a separate order reached `APPROVED`. No Day 7 capture has been verified. The successful Day 2 payment was a separate REST spike.
 
 ```text
 Scripted proposal → trusted demo session + interactive user confirmation
@@ -23,9 +23,11 @@ python scripts/demo_purchase.py create --operation-id demo_create_001 --amount 1
 python scripts/demo_purchase.py open-approval --operation-id demo_create_001
 ```
 
-The first command prints a sanitized `ALLOW`, `COMPLETED`, order ID, and audit state if successful. The second opens a validated Sandbox buyer page without printing its URL. Sign in as the Sandbox buyer and approve manually. Then copy the order ID from the first command into these commands:
+The first command prints a sanitized decision, local operation state, order ID, and separate creation/approval/capture states. Local `COMPLETED` means the create action finished, not that a payment was captured. The second opens a validated Sandbox buyer page without printing its URL. Sign in as the Sandbox buyer and approve manually. Then use the exact saved order ID for capture.
 
-If `open-approval` fails, run `reconcile` for the create operation and check its sanitized `order_status` or failure code. PayPal documents both `CREATED` and `PAYER_ACTION_REQUIRED` as pending buyer action; the helper accepts both. `OAUTH_HTTP_*`, `GET_HTTP_*`, and `NETWORK_OUTCOME_UNKNOWN` identify a failed read without printing provider data. Do not create a replacement order or attempt capture until the existing order is understood.
+If `open-approval` fails, run `diagnose` for the create operation and check its sanitized provider HTTP status or failure code. PayPal documents both `CREATED` and `PAYER_ACTION_REQUIRED` as pending buyer action; the helper accepts both. `OAUTH_HTTP_*`, `GET_HTTP_*`, and `NETWORK_OUTCOME_UNKNOWN` identify a failed read without printing provider data. Do not create a replacement order or attempt capture until the existing order is understood.
+
+For a read-only payment status check, use `python scripts/demo_purchase.py diagnose --operation-id <create-operation-id>`. OAuth token acquisition can require a POST; the command makes no create or capture request. See [Day 7 retrieval troubleshooting](07_sandbox_404_troubleshooting.md) for the existing 404 and recovery conditions.
 
 ```powershell
 python scripts/demo_purchase.py capture --operation-id demo_capture_001 --order-id ORDER_ID_FROM_CREATE --amount 1.00
