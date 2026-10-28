@@ -20,6 +20,7 @@ GatewayReason = Literal[
     "OPERATION_CONFLICT", "OPERATION_RESERVATION_FAILED", "OPERATION_IN_PROGRESS",
     "AUTHORIZATION_CONSUMPTION_FAILED", "EXECUTION_DISABLED", "PROVIDER_OUTCOME_UNCERTAIN",
     "OPERATION_FINALIZATION_FAILED", "RECONCILIATION_REQUIRED", "VERIFIED_COMPLETED", "VERIFIED_NO_PAYMENT",
+    "KILL_SWITCH_ACTIVE",
 ]
 
 
@@ -141,12 +142,14 @@ class PaymentGateway:
         consumer: AuthorizationConsumer,
         adapter: ProtectedAdapter | None = None,
         *, enable_sandbox_execution: bool = False,
+        kill_switch: object | None = None,
     ) -> None:
         self._policy = policy
         self._operations = operations
         self._consumer = consumer
         self._adapter = adapter
         self._enable_sandbox_execution = enable_sandbox_execution
+        self._kill_switch = kill_switch
 
     def submit(
         self, intent: PaymentIntent, context: AuthenticatedScope,
@@ -191,6 +194,35 @@ class PaymentGateway:
             if reservation.result is None:
                 return self._result(intent, None, "UNCERTAIN", "OPERATION_FINALIZATION_FAILED")
             return reservation.result
+
+        if self._kill_switch is not None:
+            try:
+                if bool(getattr(self._kill_switch, "is_kill_switch_active", lambda: False)()):
+                    decision = PolicyDecision(
+                        decision_id="decision_" + hashlib.sha256(
+                            f"{intent.operation_id}:kill_switch_active".encode("ascii")
+                        ).hexdigest()[:24],
+                        operation_id=intent.operation_id,
+                        outcome="BLOCK",
+                        reason_codes=("KILL_SWITCH_ACTIVE",),
+                        policy_version=POLICY_VERSION,
+                        evaluated_at=datetime.now(timezone.utc),
+                        audit_metadata=PolicyAudit(authorization_lookup="skipped"),
+                    )
+                    return self._finalize(intent, fingerprint, decision, "REJECTED", "KILL_SWITCH_ACTIVE")
+            except Exception:
+                decision = PolicyDecision(
+                    decision_id="decision_" + hashlib.sha256(
+                        f"{intent.operation_id}:kill_switch_read_error".encode("ascii")
+                    ).hexdigest()[:24],
+                    operation_id=intent.operation_id,
+                    outcome="BLOCK",
+                    reason_codes=("KILL_SWITCH_ACTIVE",),
+                    policy_version=POLICY_VERSION,
+                    evaluated_at=datetime.now(timezone.utc),
+                    audit_metadata=PolicyAudit(authorization_lookup="skipped"),
+                )
+                return self._finalize(intent, fingerprint, decision, "REJECTED", "KILL_SWITCH_ACTIVE")
 
         try:
             decision = self._policy.evaluate(intent, context, advisory_signals=advisory_signals)

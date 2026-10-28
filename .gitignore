@@ -2,6 +2,7 @@ __pycache__/
 **/__pycache__/
 *.py[cod]
 .pytest_cache/
+src/agentsentinel.egg-info/
 .venv/
 venv/
 .env

@@ -19,3 +19,7 @@ Run: `python scripts/run_attack_suite.py`. Spy calls count only the attack attem
 | REVIEW amount threshold | REVIEW | REVIEW | REVIEW_AMOUNT_THRESHOLD | 0 | PASS |
 | advisory escalation | REVIEW | REVIEW | REVIEW_ADVISORY_SIGNAL | 0 | PASS |
 | safety dependency failure | BLOCK | BLOCK | OPERATION_RESERVATION_FAILED | 0 | PASS |
+| approval fingerprint mismatch | BLOCK | BLOCK | approval request fingerprint mismatch | 0 | PASS |
+| approval kill switch active | BLOCK | BLOCK | kill switch active | 0 | PASS |
+| approval cannot override block | BLOCK | BLOCK | KILL_SWITCH_ACTIVE | 0 | PASS |
+| approval stale expiry | BLOCK | BLOCK | approval expired | 0 | PASS |

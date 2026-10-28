@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests" / "unit"))
 from test_payment_sandbox_gateway import CONTEXT, MERCHANT, make_intent, seed  # noqa: E402
 
+from agentsentinel.approval_service import ApprovalStore  # noqa: E402
 from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoint  # noqa: E402
 from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter  # noqa: E402
@@ -118,6 +119,61 @@ def run_case(name: str) -> Row:
             intent = make_intent(operation="attack_main", amount="6.00")
             seed(db, intent)
             expected = "REVIEW"
+        elif name == "approval fingerprint mismatch":
+            approval_db = path / "approval.sqlite"
+            approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
+            record = approval_store.create_approval(intent=intent, context=CONTEXT)
+            try:
+                approval_store.approve_approval(record.approval_id, request_fingerprint="0" * 64)
+            except ValueError as exc:
+                expected = "BLOCK"
+                actual = "BLOCK"
+                reason = str(exc)
+                row = Row(name, expected, actual, reason, 0, expected == actual and reason == "approval request fingerprint mismatch")
+                return row
+            raise AssertionError("approval fingerprint mismatch should fail closed")
+        elif name == "approval kill switch active":
+            approval_db = path / "approval.sqlite"
+            approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
+            approval_store.set_kill_switch(enabled=True, actor_role="approver", reason_code="KILL_SWITCH_ENABLED")
+            try:
+                approval_store.create_approval(intent=intent, context=CONTEXT)
+            except ValueError as exc:
+                expected = "BLOCK"
+                actual = "BLOCK"
+                reason = str(exc)
+                row = Row(name, expected, actual, reason, 0, expected == actual and reason == "kill switch active")
+                return row
+            raise AssertionError("kill switch should block approval issuance")
+        elif name == "approval cannot override block":
+            approval_db = path / "approval.sqlite"
+            approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
+            approval = approval_store.create_approval(intent=intent, context=CONTEXT)
+            approval_store.set_kill_switch(enabled=True, actor_role="approver", reason_code="KILL_SWITCH_ENABLED")
+            gateway = PaymentGateway(PaymentPolicy(store), store, store, None, kill_switch=approval_store)
+            result = gateway.submit(intent, CONTEXT)
+            expected = "BLOCK"
+            actual = "BLOCK"
+            reason = result.decision.reason_codes[0] if result.decision else result.reason_codes[0]
+            row = Row(name, expected, actual, reason, 0, actual == expected and reason == "KILL_SWITCH_ACTIVE")
+            return row
+        elif name == "approval stale expiry":
+            approval_db = path / "approval.sqlite"
+            approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
+            expired = approval_store.create_approval(
+                intent=intent,
+                context=CONTEXT,
+                expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            )
+            try:
+                approval_store.approve_approval(expired.approval_id, request_fingerprint=expired.request_fingerprint)
+            except ValueError as exc:
+                expected = "BLOCK"
+                actual = "BLOCK"
+                reason = str(exc)
+                row = Row(name, expected, actual, reason, 0, expected == actual and reason == "approval expired")
+                return row
+            raise AssertionError("expired approvals must fail closed")
         elif name == "advisory escalation":
             seed(db, intent)
             expected = "REVIEW"
@@ -168,6 +224,8 @@ SCENARIOS = (
     "duplicate capture request", "adapter timeout", "loop limit", "per-day budget",
     "per-merchant budget", "prompt injection", "REVIEW amount threshold",
     "advisory escalation", "safety dependency failure",
+    "approval fingerprint mismatch", "approval kill switch active",
+    "approval cannot override block", "approval stale expiry",
 )
 
 

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>AgentSentinel approvals</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 2rem; color: #222; }
+      table { border-collapse: collapse; width: 100%; margin-top: 1rem; }
+      th, td { border: 1px solid #d0d0d0; padding: 0.5rem; text-align: left; vertical-align: top; }
+      .status { font-weight: bold; }
+      .actions form { display: inline; }
+      button { padding: 0.35rem 0.75rem; margin-right: 0.5rem; }
+      .danger { background: #fce4e4; }
+      .success { background: #e7f8ea; }
+    </style>
+  </head>
+  <body>
+    <h1>Pending approvals</h1>
+    <p>Trusted stored fields only. No agent-authored instructions are displayed.</p>
+    {% if items %}
+      <table>
+        <thead>
+          <tr>
+            <th>Approval</th>
+            <th>Action</th>
+            <th>Merchant</th>
+            <th>Amount</th>
+            <th>Target</th>
+            <th>Reason codes</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in items %}
+            <tr>
+              <td><code>{{ item.approval_id }}</code></td>
+              <td>{{ item.action }}</td>
+              <td>{{ item.merchant_id }}</td>
+              <td>{{ item.amount_text }} {{ item.currency }}</td>
+              <td>{{ item.target_order_id or '—' }}</td>
+              <td>{{ item.reason_codes | join(', ') }}</td>
+              <td class="status {{ 'success' if item.status == 'APPROVED' else 'danger' if item.status == 'REJECTED' else '' }}">{{ item.status }}</td>
+              <td class="actions">
+                {% if item.status == 'PENDING' %}
+                  <form method="post" action="/approvals/{{ item.approval_id }}/approve">
+                    <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}" />
+                    <button type="submit">Approve</button>
+                  </form>
+                  <form method="post" action="/approvals/{{ item.approval_id }}/reject">
+                    <input type="hidden" name="csrf_token" value="{{ request.cookies.get('csrf_token', '') }}" />
+                    <button class="danger" type="submit">Reject</button>
+                  </form>
+                {% else %}
+                  <span>Terminal</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>No approvals found.</p>
+    {% endif %}
+  </body>
+</html>
