@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentSentinel Control Center — Sign in</title>
+    <link rel="stylesheet" href="/dashboard/static/dashboard.css" />
+  </head>
+  <body class="login-page">
+    <main class="login-card">
+      <p class="eyebrow">LOCAL CONTROL PLANE</p>
+      <h1>AgentSentinel</h1>
+      <p>Sign in with an operator credential. Dashboard sessions expire after one hour.</p>
+      {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      <form method="post" action="/dashboard/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <label for="credential">Dashboard credential</label>
+        <input id="credential" name="credential" type="password" autocomplete="current-password" maxlength="512" required />
+        <button type="submit">Sign in</button>
+      </form>
+      <p class="muted">Read-only viewers use DASHBOARD_VIEWER_SECRET when configured. APPROVER_SECRET grants operator actions.</p>
+    </main>
+  </body>
+</html>

@@ -576,6 +576,8 @@ def create_app(
     *,
     db_path: str | Path | None = None,
     approver_secret: str | None = None,
+    viewer_secret: str | None = None,
+    telemetry_db_path: str | Path | None = None,
     ttl_seconds: int = 3600,
     host: str = "127.0.0.1",
 ) -> FastAPI:
@@ -585,6 +587,24 @@ def create_app(
     app = FastAPI(title="AgentSentinel approval service", docs_url="/docs", redoc_url=None)
     app.state.approval_store = store
     templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
+    from fastapi.staticfiles import StaticFiles
+
+    from agentsentinel.dashboard import create_dashboard_router
+
+    app.mount(
+        "/dashboard/static",
+        StaticFiles(directory=str(Path(__file__).resolve().parent / "templates" / "static")),
+        name="dashboard-static",
+    )
+    app.include_router(
+        create_dashboard_router(
+            store=store,
+            payment_db_path=db_path,
+            approver_secret=approver_secret,
+            viewer_secret=viewer_secret,
+            telemetry_db_path=Path(telemetry_db_path) if telemetry_db_path else None,
+        )
+    )
 
     @app.get("/health")
     def health() -> dict[str, str]:

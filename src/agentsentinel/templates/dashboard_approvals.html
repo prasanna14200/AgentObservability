@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Approvals — AgentSentinel</title><link rel="stylesheet" href="/dashboard/static/dashboard.css" /></head>
+  <body>
+    <header class="topbar"><a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a><nav><a href="/dashboard">Overview</a><a href="/dashboard/traces">Payment traces</a><a href="/dashboard/alerts">Security alerts</a><a href="/dashboard/approvals">Approvals</a><a href="/dashboard/demo">Offline demo</a></nav><span class="badge">{{ role }}</span></header>
+    <main class="page"><p class="eyebrow">EXISTING TRUSTED APPROVAL STORE</p><h1>Human approval queue</h1>
+      <p class="muted">Read-only queue view. Actions require the approver role, CSRF token, explicit confirmation, exact stored fingerprint, unexpired state, and a fresh kill-switch check. Approval is not execution.</p>
+      {% if items is none %}<section class="empty-state"><h2>No data</h2><p>The approval database is unavailable.</p></section>
+      {% elif items %}
+        <div class="table-wrap"><table><thead><tr><th>Request</th><th>Action</th><th>Merchant</th><th>Amount</th><th>Reasons</th><th>Expiry</th><th>Status</th><th>Operator action</th></tr></thead><tbody>
+        {% for item in items %}<tr>
+          <td><code>{{ item.approval_id }}</code><br /><small>Operation {{ item.operation_id }}</small></td>
+          <td>{{ item.action }}</td><td>{{ item.merchant_id }}</td><td>{{ item.amount_text }} {{ item.currency }}</td>
+          <td>{{ item.reason_codes | join(', ') }}</td><td>{{ item.expires_at }}</td>
+          <td><span class="badge {{ 'danger' if item.status == 'REJECTED' or item.status == 'EXPIRED' else 'review' if item.status == 'PENDING' else '' }}">{{ item.status }}</span></td>
+          <td>{% if role == 'approver' and item.status == 'PENDING' %}
+            <form method="post" action="/dashboard/approvals/{{ item.approval_id }}/approve" class="action-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" /><input type="hidden" name="request_fingerprint" value="{{ item.request_fingerprint }}" />
+              <label class="confirm"><input type="checkbox" name="confirm" value="yes" required /> Confirm approval</label><button class="button" type="submit">Approve</button>
+            </form>
+            <form method="post" action="/dashboard/approvals/{{ item.approval_id }}/reject" class="action-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" /><input type="hidden" name="request_fingerprint" value="{{ item.request_fingerprint }}" />
+              <label class="confirm"><input type="checkbox" name="confirm" value="yes" required /> Confirm rejection</label><button class="button danger-button" type="submit">Reject</button>
+            </form>
+          {% elif item.status == 'PENDING' %}<span>Approver role required</span>{% else %}<span>Terminal</span>{% endif %}</td>
+        </tr>{% endfor %}</tbody></table></div>
+      {% else %}<section class="empty-state"><h2>No approvals</h2><p>No approval requests are currently stored.</p></section>{% endif %}
+      {% if items and items | length > 500 %}<p class="warning">Display capped at 500 approval records.</p>{% endif %}
+    </main>
+  </body>
+</html>

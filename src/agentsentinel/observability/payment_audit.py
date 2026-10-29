@@ -33,15 +33,34 @@ class PaymentAuditChain:
     The chain does not retrofit or modify legacy operation/approval events.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self.read_only = read_only
+        if read_only:
+            if not self.path.is_file():
+                raise PaymentAuditUnavailable("payment audit database unavailable")
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._initialize()
+
+    @classmethod
+    def open_readonly(cls, path: str | Path) -> PaymentAuditChain:
+        """Open an existing chain for verification without initializing or writing it."""
+        return cls(path, read_only=True)
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.path), timeout=10.0, isolation_level=None)
+        if self.read_only:
+            conn = sqlite3.connect(
+                self.path.resolve().as_uri() + "?mode=ro",
+                uri=True,
+                timeout=10.0,
+                isolation_level=None,
+            )
+        else:
+            conn = sqlite3.connect(str(self.path), timeout=10.0, isolation_level=None)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA synchronous=FULL")
+        if not self.read_only:
+            conn.execute("PRAGMA synchronous=FULL")
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
@@ -101,6 +120,8 @@ class PaymentAuditChain:
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def append(self, event: PaymentTelemetryEvent) -> Literal["appended", "duplicate"]:
+        if self.read_only:
+            raise PaymentAuditUnavailable("payment audit is read only")
         event = PaymentTelemetryEvent.model_validate(event.model_dump(mode="python"))
         canonical_event = self.canonical_json(event.model_dump(mode="json"))
         try:

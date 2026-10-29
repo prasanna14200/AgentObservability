@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentSentinel Control Center</title>
+    <link rel="stylesheet" href="/dashboard/static/dashboard.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a>
+      <nav>
+        <a href="/dashboard">Overview</a>
+        <a href="/dashboard/traces">Payment traces</a>
+        <a href="/dashboard/alerts">Security alerts</a>
+        <a href="/dashboard/approvals">Approvals</a>
+        <a href="/dashboard/demo">Offline demo</a>
+      </nav>
+      <form method="post" action="/dashboard/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button class="button subtle" type="submit">Sign out ({{ role }})</button>
+      </form>
+    </header>
+    <main class="page">
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">PAYMENT SAFETY · LOCAL ONLY</p>
+          <h1>Overview</h1>
+          <p class="muted">Persisted operational data only. Synthetic demo data is kept separate.</p>
+        </div>
+        <span class="badge">Authenticated · {{ role }}</span>
+      </div>
+      <section class="metric-grid" aria-label="Payment metrics">
+        {% for key, label in [
+          ('operations', 'Payment operations'),
+          ('decision_allow', 'ALLOW decisions'),
+          ('decision_block', 'BLOCK decisions'),
+          ('decision_review', 'REVIEW decisions'),
+          ('completed', 'Completed outcomes'),
+          ('uncertain', 'Uncertain outcomes'),
+          ('pending_approvals', 'Pending approvals'),
+          ('telemetry_failures', 'Telemetry failures (24h)')
+        ] %}
+          <article class="metric-card">
+            <p class="metric-label">{{ label }}</p>
+            <strong>{{ metrics[key].value }}</strong>
+            <small>{{ metrics[key].source }}<br />{{ metrics[key].time_range }}</small>
+          </article>
+        {% endfor %}
+      </section>
+      <section class="panel-grid">
+        <article class="panel">
+          <div class="panel-heading"><h2>Kill switch</h2><span class="badge {{ 'danger' if metrics.kill_switch.value == 'ENABLED' else '' }}">{{ metrics.kill_switch.value }}</span></div>
+          <p class="muted">{{ metrics.kill_switch.source }} · {{ metrics.kill_switch.time_range }}</p>
+          {% if role == 'approver' and metrics.kill_switch.value != 'No data' %}
+            <p class="warning">State changes block payment execution and are written to the approval audit log.</p>
+            <form method="post" action="/dashboard/killswitch" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <input type="hidden" name="enabled" value="{{ 'false' if metrics.kill_switch.value == 'ENABLED' else 'true' }}" />
+              <label class="confirm"><input type="checkbox" name="confirm" value="yes" required /> I confirm this control-state change.</label>
+              <button class="button {{ 'danger-button' if metrics.kill_switch.value != 'ENABLED' else '' }}" type="submit">
+                {{ 'Disable kill switch' if metrics.kill_switch.value == 'ENABLED' else 'Enable kill switch' }}
+              </button>
+            </form>
+          {% else %}
+            <p class="muted">Operator action unavailable. Missing or unreadable state remains fail-closed.</p>
+          {% endif %}
+        </article>
+        <article class="panel">
+          <div class="panel-heading"><h2>Audit integrity</h2><span class="badge {{ 'danger' if audit.status == 'INVALID' else '' }}">{{ audit.status }}</span></div>
+          <p><strong>{{ audit.records_checked }}</strong> chained records verified</p>
+          <p class="muted">First broken sequence: {{ audit.first_broken_sequence }} · {{ audit.mode }}</p>
+          <p class="muted">Verification timestamp: {{ audit.verified_at }} · external anchoring is not implemented.</p>
+          {% if role == 'approver' %}
+            <form method="post" action="/dashboard/audit/verify" class="inline-form">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <label class="confirm"><input type="checkbox" name="confirm" value="yes" required /> Run a live read-only verification.</label>
+              <button class="button" type="submit">Verify now</button>
+            </form>
+          {% endif %}
+        </article>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><h2>Decision and approval summary</h2><a href="/dashboard/approvals">Open approval queue →</a></div>
+        <p>Decisions:
+          {% if decision_counts is not none %}
+            {% for decision, count in decision_counts.items() %}{{ decision }}: {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}
+          {% else %}No data{% endif %}
+          <span class="muted">· {{ time_range }}</span>
+        </p>
+        <p>Approval states:
+          {% if approval_counts is not none %}
+            {% for state, count in approval_counts.items() %}{{ state }}: {{ count }}{% if not loop.last %} · {% endif %}{% endfor %}
+          {% else %}No data{% endif %}
+        </p>
+      </section>
+      <section class="panel">
+        <div class="panel-heading"><h2>Recent security alerts</h2><a href="/dashboard/alerts">View all →</a></div>
+        {% if alerts %}
+          <div class="table-wrap"><table>
+            <thead><tr><th>Time</th><th>Class</th><th>Alert</th><th>Trace</th><th>Evidence</th></tr></thead>
+            <tbody>{% for alert in alerts[:8] %}
+              <tr><td>{{ alert.timestamp }}</td><td>{{ alert.kind }}</td><td>{{ alert.label }}</td><td>{{ alert.trace_id }}</td><td>{{ alert.details }}</td></tr>
+            {% endfor %}</tbody>
+          </table></div>
+        {% else %}<p class="muted">No alert data in this time range.</p>{% endif %}
+      </section>
+      <p class="footer-note">Dashboard data is observational. Detector alerts are advisory and are not confirmed fraud. Deterministic policy and the gateway remain authoritative.</p>
+    </main>
+  </body>
+</html>

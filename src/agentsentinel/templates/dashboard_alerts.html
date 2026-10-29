@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Security alerts — AgentSentinel</title><link rel="stylesheet" href="/dashboard/static/dashboard.css" /></head>
+  <body>
+    <header class="topbar"><a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a><nav><a href="/dashboard">Overview</a><a href="/dashboard/traces">Payment traces</a><a href="/dashboard/alerts">Security alerts</a><a href="/dashboard/approvals">Approvals</a><a href="/dashboard/demo">Offline demo</a></nav><span class="badge">{{ role }}</span></header>
+    <main class="page"><p class="eyebrow">ENFORCEMENT AND ADVISORY ARE SEPARATE</p><h1>Security alerts</h1><p class="muted">Source: payment audit chain · {{ time_range }} · at most 1,000 source events inspected.</p>
+      {% if alerts %}<div class="table-wrap"><table><thead><tr><th>Time</th><th>Classification</th><th>Signal</th><th>Trace</th><th>Details</th></tr></thead><tbody>
+        {% for alert in alerts %}<tr><td>{{ alert.timestamp }}</td><td>{{ alert.kind }}</td><td>{{ alert.label }}</td><td><a href="/dashboard/traces/{{ alert.trace_id }}">{{ alert.trace_id }}</a></td><td>{{ alert.details }}</td></tr>{% endfor %}
+      </tbody></table></div>{% else %}<section class="empty-state"><h2>No data</h2><p>No alert events were found in this time range.</p></section>{% endif %}
+      <p class="footer-note">Rules advisories are computed from the bounded telemetry window. Isolation Forest signals are shown only when persisted telemetry includes a detector version and score; no runtime payment model is persisted today. Detector signals are advisory only, never confirmed fraud or authorization. Deterministic policy BLOCK remains final.</p>
+    </main>
+  </body>
+</html>
