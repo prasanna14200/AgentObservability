@@ -40,8 +40,8 @@ Seed: `20261028`; total 210 synthetic traces (100 normal, 110 anomalous: 10 in e
 
 | Detector | Precision | Recall | F1 | PR-AUC | FPR | TP / FP / TN / FN | Runtime total / trace |
 |---|---:|---:|---:|---:|---:|---|---:|
-| Payment rules | 1.000000 | 0.181818 | 0.307692 | 0.824675 | 0.000000 | 20 / 0 / 30 / 90 | 190.05 ms / 1.36 ms |
-| Payment Isolation Forest | 0.830986 | 0.536364 | 0.651934 | 0.859177 | 0.400000 | 59 / 12 / 18 / 51 | 2,011.63 ms / 14.37 ms |
+| Payment rules | 1.000000 | 0.181818 | 0.307692 | 0.824675 | 0.000000 | 20 / 0 / 30 / 90 | 214.09 ms / 1.53 ms |
+| Payment Isolation Forest | 0.830986 | 0.536364 | 0.651934 | 0.859177 | 0.400000 | 59 / 12 / 18 / 51 | 2,603.70 ms / 18.60 ms |
 
 Measured locally on 2026-10-29 with the isolated project environment; runtime varies by host. This deliberately anomaly-heavy synthetic evaluation is not a production estimate and is not an enforcement test. Its precision-recall values are prevalence-sensitive. The payment Isolation Forest's 40% FPR is not a passing operating point. Separately, the existing customer-support baseline remains Gate C **FAIL**: the corrected v4 report records Isolation Forest PR-AUC 0.706 and FPR 56.9% versus rules PR-AUC 0.463 and FPR 0%; the registered FPR ceiling is 10%. These results are not combined.
 
