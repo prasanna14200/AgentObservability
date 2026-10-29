@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import closing, contextmanager, suppress
@@ -18,8 +19,13 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import AwareDatetime, field_validator
 
+from agentsentinel.observability.payment_events import (
+    PaymentTelemetryPublisher,
+    build_payment_event,
+)
 from agentsentinel.payment_policy import AuthenticatedScope, PolicyAudit, PolicyDecision, POLICY_VERSION
 from agentsentinel.schema.payment import Money, PaymentAction, PaymentAuthorization, PaymentIntent, PaymentModel, _check_id
+from agentsentinel.schema.payment_telemetry import PaymentEventType
 
 ApprovalState = Literal["PENDING", "APPROVED", "REJECTED", "EXPIRED"]
 ApprovalReason = str
@@ -83,12 +89,39 @@ class ApprovalStore:
         clock: Any | None = None,
         ttl_seconds: int = 3600,
         trusted_issuer_id: str = "trusted_approval_service",
+        telemetry_publisher: PaymentTelemetryPublisher | None = None,
     ) -> None:
         self.path = Path(path)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.ttl_seconds = int(ttl_seconds)
         self.trusted_issuer_id = _check_id(trusted_issuer_id, "trusted issuer")
+        self.telemetry_publisher = telemetry_publisher
         self._initialize()
+
+    def _publish_approval_event(
+        self,
+        event_type: PaymentEventType,
+        record: ApprovalRecord,
+        *,
+        actor_role: str,
+        reason_code: str | None = None,
+    ) -> None:
+        if self.telemetry_publisher is None:
+            return
+        safe_reason = reason_code if reason_code and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", reason_code) else None
+        safe_actor = actor_role if actor_role in {"system", "approver", "application"} else "application"
+        self.telemetry_publisher.publish(
+            build_payment_event(
+                event_type=event_type,
+                trace_id=record.trace_id,
+                operation_id=record.operation_id,
+                payment_intent_id=record.intent_id,
+                approval_id=record.approval_id,
+                action=record.action,
+                reason_codes=(safe_reason,) if safe_reason else (),
+                actor_role=safe_actor,
+            )
+        )
 
     def _now(self) -> datetime:
         now = self.clock()
@@ -302,7 +335,13 @@ class ApprovalStore:
                 ),
             )
         self._event(approval_id, actor_role="system", action="approval_created", reason_code="APPROVAL_CREATED")
-        return self.get_approval(approval_id)
+        record = self.get_approval(approval_id)
+        if record is None:
+            raise RuntimeError("created approval could not be read")
+        self._publish_approval_event(
+            "APPROVAL_REQUESTED", record, actor_role="system", reason_code="APPROVAL_CREATED"
+        )
+        return record
 
     def create_from_intent(self, intent: PaymentIntent, context: AuthenticatedScope, **kwargs: Any) -> ApprovalRecord:
         return self.create_approval(intent=intent, context=context, **kwargs)
@@ -321,8 +360,8 @@ class ApprovalStore:
                 rows = conn.execute("SELECT * FROM approvals WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
         return [self._row_to_approval(row) for row in rows]
 
-    def expire_pending_approvals(self) -> list[ApprovalRecord]:
-        now = self._now()
+    def expire_pending_approvals(self, *, now: datetime | None = None) -> list[ApprovalRecord]:
+        now = now or self._now()
         expired: list[ApprovalRecord] = []
         with self._write() as conn:
             rows = conn.execute(
@@ -337,6 +376,10 @@ class ApprovalStore:
                 )
                 expired.append(record)
                 self._event(record.approval_id, actor_role="system", action="approval_expired", reason_code="APPROVAL_EXPIRED", conn=conn)
+        for record in expired:
+            self._publish_approval_event(
+                "APPROVAL_EXPIRED", record, actor_role="system", reason_code="APPROVAL_EXPIRED"
+            )
         return expired
 
     def reject_approval(self, approval_id: str, *, actor_role: str = "approver", reason_code: str = "HUMAN_REJECTED") -> ApprovalRecord:
@@ -354,7 +397,13 @@ class ApprovalStore:
                 (reason_code, approval_id),
             )
         self._event(approval_id, actor_role=actor_role, action="approval_rejected", reason_code=reason_code)
-        return self.get_approval(approval_id)
+        updated = self.get_approval(approval_id)
+        if updated is None:
+            raise RuntimeError("rejected approval could not be read")
+        self._publish_approval_event(
+            "APPROVAL_REJECTED", updated, actor_role=actor_role, reason_code=reason_code
+        )
+        return updated
 
     def approve_approval(
         self,
@@ -365,6 +414,9 @@ class ApprovalStore:
         reason_code: str = "APPROVED",
     ) -> ApprovalRecord:
         now = self._now()
+        expired = self.expire_pending_approvals(now=now)
+        if any(record.approval_id == approval_id for record in expired):
+            raise ValueError("approval expired")
         with self._write() as conn:
             kill_row = conn.execute("SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'").fetchone()
             if kill_row is not None and bool(kill_row["enabled"]):
@@ -430,7 +482,13 @@ class ApprovalStore:
                 (reason_code, approval_id),
             )
             self._event(approval_id, actor_role=actor_role, action="approval_approved", reason_code=reason_code, conn=conn)
-        return self.get_approval(approval_id)
+        approved = self.get_approval(approval_id)
+        if approved is None:
+            raise RuntimeError("approved record could not be read")
+        self._publish_approval_event(
+            "APPROVAL_APPROVED", approved, actor_role=actor_role, reason_code=reason_code
+        )
+        return approved
 
     def read_kill_switch(self) -> KillSwitchState:
         with closing(self._connect()) as conn:
@@ -455,7 +513,17 @@ class ApprovalStore:
                 ("payment_kill_switch", int(enabled), now.isoformat(), reason),
             )
         self._event("kill_switch", actor_role=actor_role, action="kill_switch_enabled" if enabled else "kill_switch_disabled", reason_code=reason)
-        return self.read_kill_switch()
+        state = self.read_kill_switch()
+        if self.telemetry_publisher is not None:
+            self.telemetry_publisher.publish(
+                build_payment_event(
+                    event_type="KILL_SWITCH_ENABLED" if enabled else "KILL_SWITCH_DISABLED",
+                    actor_role=actor_role if actor_role in {"system", "approver", "application"} else "application",
+                    reason_codes=(reason,) if re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", reason) else (),
+                    timestamp=now,
+                )
+            )
+        return state
 
     def list_events(self, *, approval_id: str | None = None) -> list[ApprovalEvent]:
         with closing(self._connect()) as conn:

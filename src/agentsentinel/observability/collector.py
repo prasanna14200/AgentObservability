@@ -9,16 +9,22 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from threading import Lock
+from typing import Any, Literal
 
 from pydantic import ValidationError
 
+from agentsentinel.observability.payment_audit import PaymentAuditChain, PaymentAuditUnavailable
 from agentsentinel.schema.redaction import redact_mapping
+from agentsentinel.schema.payment_telemetry import PaymentTelemetryEvent
 from agentsentinel.schema.trace import TraceRecord
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -26,6 +32,12 @@ class Rejection:
     reason: str
     trace_id: str | None
     rejected_at: str
+
+
+@dataclass(frozen=True)
+class PaymentTelemetryCapture:
+    status: Literal["accepted", "duplicate", "rejected", "unavailable"]
+    reason_code: str | None = None
 
 
 class TraceCollector:
@@ -40,6 +52,9 @@ class TraceCollector:
         self.sink_root = Path(sink_root)
         self.rejection_sink = self.sink_root / "rejected" / "rejections.jsonl"
         self.rejections: list[Rejection] = []
+        self.payment_diagnostics: list[PaymentTelemetryCapture] = []
+        self._payment_chain: PaymentAuditChain | None = None
+        self._payment_chain_lock = Lock()
 
     def capture(self, raw_event: dict[str, Any]) -> TraceRecord | None:
         """Capture one raw trace payload.
@@ -62,6 +77,55 @@ class TraceCollector:
 
         self._write_trace(trace)
         return trace
+
+    def capture_payment_event(self, raw_event: PaymentTelemetryEvent | dict[str, Any]) -> PaymentTelemetryCapture:
+        """Persist a validated payment event and its hash-chain entry atomically.
+
+        Failures are returned and retained as bounded diagnostics. Callers must
+        not treat telemetry status as authorization evidence.
+        """
+        try:
+            event = PaymentTelemetryEvent.model_validate(raw_event)
+        except ValidationError as error:
+            first_error = error.errors()[0]
+            location = ".".join(str(part) for part in first_error["loc"])
+            result = PaymentTelemetryCapture("rejected", f"INVALID_PAYMENT_EVENT:{location}")
+            self.payment_diagnostics.append(result)
+            self._write_payment_diagnostic(result)
+            logger.error("payment telemetry rejected (%s)", result.reason_code)
+            return result
+        try:
+            if self._payment_chain is None:
+                with self._payment_chain_lock:
+                    if self._payment_chain is None:
+                        self._payment_chain = PaymentAuditChain(self.sink_root / "payment_telemetry.sqlite")
+            stored = self._payment_chain.append(event)
+            result = PaymentTelemetryCapture("duplicate" if stored == "duplicate" else "accepted")
+            self.payment_diagnostics.append(result)
+            return result
+        except (PaymentAuditUnavailable, OSError):
+            result = PaymentTelemetryCapture("unavailable", "PAYMENT_TELEMETRY_STORE_UNAVAILABLE")
+            self.payment_diagnostics.append(result)
+            self._write_payment_diagnostic(result, event_id=event.event_id)
+            logger.error("payment telemetry store unavailable for event_id=%s", event.event_id)
+            return result
+
+    def _write_payment_diagnostic(
+        self, result: PaymentTelemetryCapture, *, event_id: str | None = None
+    ) -> None:
+        payload = {
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "status": result.status,
+            "reason_code": result.reason_code,
+            "event_id": event_id,
+        }
+        try:
+            path = self.sink_root / "rejected" / "payment_telemetry.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, sort_keys=True) + "\n")
+        except OSError:
+            logger.error("payment telemetry diagnostic could not be persisted")
 
     def _sanitize(self, raw_event: dict[str, Any]) -> dict[str, Any]:
         copied = copy.deepcopy(raw_event)

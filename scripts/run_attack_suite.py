@@ -22,6 +22,9 @@ sys.path.insert(0, str(ROOT / "tests" / "unit"))
 from test_payment_sandbox_gateway import CONTEXT, MERCHANT, make_intent, seed  # noqa: E402
 
 from agentsentinel.approval_service import ApprovalStore  # noqa: E402
+from agentsentinel.detectors.payment import PaymentDetection, PaymentDetectorAdapter  # noqa: E402
+from agentsentinel.observability.payment_audit import PaymentAuditChain  # noqa: E402
+from agentsentinel.observability.payment_events import PaymentTelemetryPublisher, build_payment_event  # noqa: E402
 from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoint  # noqa: E402
 from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter  # noqa: E402
@@ -174,6 +177,60 @@ def run_case(name: str) -> Row:
                 row = Row(name, expected, actual, reason, 0, expected == actual and reason == "approval expired")
                 return row
             raise AssertionError("expired approvals must fail closed")
+        elif name == "advisory anomaly cannot override block":
+            intent = make_intent(operation="attack_main", amount="2.00")
+            seed(db, intent, amount="1.00")
+            detection = PaymentDetection(
+                detector_version="attack-test-v1",
+                anomaly=True,
+                anomaly_score=1.0,
+                reason_codes=("SYNTHETIC_HIGH_SCORE",),
+            )
+            signals = PaymentDetectorAdapter.advisory_signals((detection,), "BLOCK")
+            result = gateway.submit(intent, CONTEXT, advisory_signals=signals)
+            actual = result.decision.outcome if result.decision else "BLOCK"
+            reason = result.decision.reason_codes[0] if result.decision else result.reason_codes[0]
+            return Row(name, "BLOCK", actual, reason, len(spy.calls), actual == "BLOCK" and not spy.calls)
+        elif name == "telemetry failure cannot authorize":
+            class FailingCollector:
+                def capture_payment_event(self, raw_event):
+                    raise OSError("test telemetry sink unavailable")
+
+            failing_gateway = PaymentGateway(
+                PaymentPolicy(store), store, store,
+                SandboxPaymentAdapter(PayPalSandboxClient(SandboxConfig("fake_client", "fake_secret", MERCHANT), spy)),
+                enable_sandbox_execution=True,
+                telemetry_publisher=PaymentTelemetryPublisher(FailingCollector()),
+            )
+            result = failing_gateway.submit(intent, CONTEXT)
+            actual = result.decision.outcome if result.decision else "BLOCK"
+            reason = result.decision.reason_codes[0] if result.decision else result.reason_codes[0]
+            return Row(name, "BLOCK", actual, reason, len(spy.calls), actual == "BLOCK" and not spy.calls)
+        elif name == "tampered audit record detected":
+            audit_path = path / "tampered_audit.sqlite"
+            audit = PaymentAuditChain(audit_path)
+            audit.append(build_payment_event(
+                event_type="PAYMENT_PROPOSED",
+                trace_id="audit_trace",
+                operation_id="audit_operation",
+                payment_intent_id="audit_intent",
+                action="create_order",
+                actor_role="application",
+            ))
+            with closing(sqlite3.connect(audit_path)) as conn, conn:
+                conn.execute(
+                    "UPDATE payment_audit_chain SET event_type='PAYMENT_BLOCKED' WHERE sequence_number=1"
+                )
+            verification = audit.verify()
+            actual = "BLOCK" if not verification.valid else "ALLOW"
+            return Row(
+                name,
+                "BLOCK",
+                actual,
+                verification.reason_code or "AUDIT_VERIFIED",
+                0,
+                actual == "BLOCK" and verification.first_broken_sequence == 1,
+            )
         elif name == "advisory escalation":
             seed(db, intent)
             expected = "REVIEW"
@@ -226,6 +283,8 @@ SCENARIOS = (
     "advisory escalation", "safety dependency failure",
     "approval fingerprint mismatch", "approval kill switch active",
     "approval cannot override block", "approval stale expiry",
+    "advisory anomaly cannot override block", "telemetry failure cannot authorize",
+    "tampered audit record detected",
 )
 
 

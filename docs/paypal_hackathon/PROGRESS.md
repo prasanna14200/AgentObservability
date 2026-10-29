@@ -1,6 +1,6 @@
 # PayPal hackathon implementation progress
 
-Updated: 2026-10-14. The statuses below refer to the **new 12 stages**, not the original master-plan phase numbers.
+Updated: 2026-10-29. The statuses below refer to the **new 12 stages**, not the original master-plan phase numbers.
 
 | Stage | Stage name | Status | Existing files reused | Files changed | Tests and evidence | Remaining work |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -53,4 +53,12 @@ Day 8 is complete locally as an offline simulation suite. `python scripts/run_at
 
 ## AI purchase agent Day 9
 
-Day 9 is **COMPLETE as an offline AI-agent prototype**. The same LangGraph purchase agent uses either a deterministic scripted LLM or the local Ollama model `qwen2.5:1.5b`; it can propose create and capture actions but cannot issue authorization or access PayPal. The controlled side-by-side demo shows the poisoned USD 9.00 capture moving mock money only in the unprotected path; the existing gateway blocks it. Five local-model runs followed the injected catalog text, and all five were blocked by the gateway with zero mock money moved. See `09_purchase_agent.md`. No PayPal Sandbox request occurred. Day 10 has not started.
+Day 9 is **COMPLETE as an offline AI-agent prototype**. The same LangGraph purchase agent uses either a deterministic scripted LLM or the local Ollama model `qwen2.5:1.5b`; it can propose create and capture actions but cannot issue authorization or access PayPal. The controlled side-by-side demo shows the poisoned USD 9.00 capture moving mock money only in the unprotected path; the existing gateway blocks it. Five local-model runs followed the injected catalog text, and all five were blocked by the gateway with zero mock money moved. See `09_purchase_agent.md`. No PayPal Sandbox request occurred.
+
+## Human approval Day 10
+
+Day 10 is **COMPLETE** at commit `0777b31`: durable approval queue, approver authentication and CSRF, approval UI, atomic authorization issuance, kill switch, and audit events. The local Day 10 verification reported 235 passing tests and 19/19 offline attack scenarios; the user confirmed the commit was pushed to `origin/main`.
+
+## Payment observability Day 11
+
+Day 11 adds versioned payment telemetry through the existing `TraceCollector`, advisory adapters for the existing rules and Isolation Forest detectors, a separate deterministic payment synthetic evaluation, and a SQLite SHA-256 audit chain with a verifier. Existing operation/approval audit rows are preserved without backfill. Validation collected and passed 246 tests, passed all 22 offline attack scenarios, verified audit success/edit/reordering/concurrent append, and recorded payment-domain synthetic metrics in `11_payment_observability.md`. The corrected customer-support Gate C baseline remains FAIL (Isolation Forest FPR 56.9%, above the registered 10% ceiling); payment synthetic metrics are separate and do not establish production performance. No Day 12 work is included.

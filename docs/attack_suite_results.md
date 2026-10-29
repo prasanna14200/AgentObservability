@@ -23,3 +23,6 @@ Run: `python scripts/run_attack_suite.py`. Spy calls count only the attack attem
 | approval kill switch active | BLOCK | BLOCK | kill switch active | 0 | PASS |
 | approval cannot override block | BLOCK | BLOCK | KILL_SWITCH_ACTIVE | 0 | PASS |
 | approval stale expiry | BLOCK | BLOCK | approval expired | 0 | PASS |
+| advisory anomaly cannot override block | BLOCK | BLOCK | AUTHORIZATION_AMOUNT_MISMATCH | 0 | PASS |
+| telemetry failure cannot authorize | BLOCK | BLOCK | AUTHORIZATION_MISSING | 0 | PASS |
+| tampered audit record detected | BLOCK | BLOCK | RECORD_HASH_MISMATCH | 0 | PASS |
