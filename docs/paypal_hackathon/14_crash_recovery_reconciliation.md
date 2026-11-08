@@ -76,6 +76,26 @@ uncertain instead.
 - All Day 14 tests use temporary SQLite databases, fake adapters, and fake
   verifiers. No live PayPal request was made.
 
+## Developer integration: `@guard`
+
+`from agentsentinel import guard` accepts only a `TrustedGatewayEntryPoint`.
+The decorated function is a proposal builder: it returns a `PaymentIntent`,
+which the decorator sends through the entry point; the entry point obtains
+authenticated context and calls the existing `PaymentGateway.submit` path.
+`GatewayResult` is returned unchanged. Policy, authorization claim, kill-switch,
+dispatch marker, adapter, and reconciliation behavior remain in the existing
+gateway.
+
+The proposal function must not perform payment or other external side effects.
+The decorator is an integration convenience, not a Python sandbox. Arbitrary
+Python code in the same process must be trusted; private-object introspection
+is not prevented. Payment execution must always go through
+`TrustedGatewayEntryPoint`, and the provider adapter must not be exposed to
+untrusted agent code. The adapter is not passed as an argument or returned by
+the decorated function, but application deployment must still keep the gateway
+and credentials outside agent-controlled code. See the five-line
+[quickstart](./14_quickstart.md).
+
 ## Verification evidence
 
 Environment: repository `.venv` on Windows, Python invoked through
@@ -94,6 +114,10 @@ The focused Day 14 suite covers 26 test cases, including:
 - Restart behavior for `RESERVED`, both `CLAIMED` dispatch states, and
   `COMPLETED`, `REVIEW_REQUIRED`, `UNCERTAIN`, and `REJECTED`.
 - Dispatch-marker event failure prevents adapter invocation.
+- Guard integration tests cover successful execution, missing authorization,
+  deterministic policy block, kill switch, review-required behavior, provider
+  uncertainty/idempotent replay, adapter non-exposure in the callable API, and
+  a successful run from a copied source tree with a clean working directory.
 
 Recorded validation:
 
@@ -117,4 +141,8 @@ ambiguous, the operation remains uncertain for manual handling. Recovery is a
 bounded local startup pass, not a continuously running service, and external
 provider behavior and production performance were not tested.
 
-This work is local and uncommitted. No push was attempted.
+The crash-recovery implementation in this report is included in commit
+`1cd74ca` (`main`); a read-only `git ls-remote origin refs/heads/main` check
+confirmed that commit was present on `origin/main` when the Developer
+Experience continuation began. The `@guard` integration and quickstart are
+separate local changes until explicitly reviewed and committed.
