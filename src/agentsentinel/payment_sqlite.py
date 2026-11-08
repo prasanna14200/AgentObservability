@@ -354,7 +354,10 @@ class SQLitePaymentStore:
                     ).fetchone()
                     if kill_switch is None:
                         raise StoreUnavailable("kill switch state unavailable")
-                    if bool(kill_switch["enabled"]):
+                    enabled = kill_switch["enabled"]
+                    if type(enabled) is not int or enabled not in (0, 1):
+                        raise StoreUnavailable("kill switch state unavailable")
+                    if enabled == 1:
                         return False
                 row = conn.execute("""SELECT * FROM authorizations
                     WHERE principal_id=? AND scope_id=? AND intent_id=? AND operation_id=?""",

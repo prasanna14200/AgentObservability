@@ -253,6 +253,15 @@ class ApprovalStore:
             decision_reason=row["decision_reason"],
         )
 
+    @staticmethod
+    def _kill_switch_enabled(conn: sqlite3.Connection) -> bool:
+        row = conn.execute(
+            "SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'"
+        ).fetchone()
+        if row is None or type(row["enabled"]) is not int or row["enabled"] not in (0, 1):
+            raise RuntimeError("kill switch state unavailable")
+        return row["enabled"] == 1
+
     def _event(
         self,
         approval_id: str,
@@ -290,8 +299,7 @@ class ApprovalStore:
         approval_id = approval_id or self._approval_id_for(intent.operation_id, intent.trace_id, intent.intent_id)
         expires = expires_at or (self._now() + timedelta(seconds=self.ttl_seconds))
         with self._write() as conn:
-            kill_row = conn.execute("SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'").fetchone()
-            if kill_row is not None and bool(kill_row["enabled"]):
+            if self._kill_switch_enabled(conn):
                 raise ValueError("kill switch active")
             existing = conn.execute(
                 "SELECT * FROM approvals WHERE operation_id=?",
@@ -426,8 +434,7 @@ class ApprovalStore:
         if any(record.approval_id == approval_id for record in expired):
             raise ValueError("approval expired")
         with self._write() as conn:
-            kill_row = conn.execute("SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'").fetchone()
-            if kill_row is not None and bool(kill_row["enabled"]):
+            if self._kill_switch_enabled(conn):
                 raise ValueError("kill switch active")
             row = conn.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
             if row is None:
@@ -501,10 +508,10 @@ class ApprovalStore:
     def read_kill_switch(self) -> KillSwitchState:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM kill_switch WHERE key='payment_kill_switch'").fetchone()
-        if row is None:
+        if row is None or type(row["enabled"]) is not int or row["enabled"] not in (0, 1):
             raise RuntimeError("kill switch state unavailable")
         return KillSwitchState(
-            enabled=bool(row["enabled"]),
+            enabled=row["enabled"] == 1,
             updated_at=datetime.fromisoformat(row["updated_at"]).astimezone(timezone.utc),
             reason_code=row["reason_code"],
         )

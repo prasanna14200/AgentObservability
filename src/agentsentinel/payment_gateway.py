@@ -351,7 +351,8 @@ class PaymentGateway:
         if not callable(read_state):
             return True
         try:
-            return bool(read_state())
+            state = read_state()
+            return state if type(state) is bool else True
         except Exception:
             return True
 

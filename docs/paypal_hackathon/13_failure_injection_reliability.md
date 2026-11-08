@@ -82,11 +82,21 @@ Commands executed:
 
 Observed results:
 
-- Full pytest suite: 280 tests collected, 280 passed.
+- Full pytest suite: 289 tests collected and passed (exit code 0).
 - Attack suite: 22/22 scenarios passed, 0 PayPal calls.
 - Secret scan: no high-confidence credential signatures or credential-shaped historical filenames found.
 - Audit verification: VALID: 1 record checked for the safe temporary chain.
 - Git diff check: passed.
+
+## Kill-switch admission verification
+
+The focused regression run passed. The ordering tests use `Event` synchronization around the actual gateway submit path:
+
+- `test_kill_switch_activation_before_atomic_admission_blocks_without_claim`: the submit reaches the claim call after policy checks; the test commits switch activation before the SQLite claim transaction. Result: deterministic BLOCK, authorization remains `issued`, and adapter call count is 0.
+- `test_execution_admission_wins_before_switch_and_is_not_cancelled`: the fake adapter pauses after claim commit; the test enables the switch while execution is in flight. Result: activation succeeds without a held DB transaction, the admitted operation completes, and adapter call count is exactly 1.
+- Missing table/row and invalid-value tests verify fail-closed behavior at the gateway and inside the atomic claim; approval creation and authorization issuance also fail closed when switch state is missing.
+- A SQLite trigger-induced claim write failure leaves authorization `issued` and does not invoke the adapter.
+- Store-path mismatch is rejected during gateway construction.
 
 ## Known limitations
 
@@ -96,4 +106,5 @@ Observed results:
 - `BEGIN IMMEDIATE` serializes switch activation with the authorization-claim transaction. If activation commits first, the claim observes the active switch and leaves authorization issued and the operation unclaimed. If claim commits first, authorization is consumed and the operation is admitted/in-flight; a later switch activation blocks subsequent admissions but cannot cancel this operation, including one whose adapter dispatch is still pending.
 - Missing, unreadable, or invalid kill-switch state fails closed. No database transaction is held during telemetry publication or adapter/provider execution.
 - The in-flight boundary does not promise cancellation of a request already admitted or dispatched. No actual PayPal request is sent or retried by these tests.
+- The final Day 13 verification for this change ran the full 289-test suite, all 22 offline attack scenarios, the repository secret scan, a one-record audit verification using a temporary SQLite database, and `git -c core.whitespace=cr-at-eol diff --check`; all passed.
 - Day 13 intentionally stops before any Day 14 work.

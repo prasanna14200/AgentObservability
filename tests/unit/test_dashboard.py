@@ -156,7 +156,7 @@ def test_empty_database_uses_no_data_without_inventing_counts(tmp_path):
     assert response.status_code == 200
     assert "No data" in response.text
     assert "No chain file" in response.text
-    assert "No persisted state (gateway default is disabled)" in response.text
+    assert "DISABLED" in response.text
 
 
 def test_trace_pagination_filter_and_bounded_page_size(tmp_path):

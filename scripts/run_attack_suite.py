@@ -123,8 +123,9 @@ def run_case(name: str) -> Row:
             seed(db, intent)
             expected = "REVIEW"
         elif name == "approval fingerprint mismatch":
-            approval_db = path / "approval.sqlite"
+            approval_db = db
             approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
+            approval_store.set_kill_switch(enabled=False, actor_role="system")
             record = approval_store.create_approval(intent=intent, context=CONTEXT)
             try:
                 approval_store.approve_approval(record.approval_id, request_fingerprint="0" * 64)
@@ -136,7 +137,7 @@ def run_case(name: str) -> Row:
                 return row
             raise AssertionError("approval fingerprint mismatch should fail closed")
         elif name == "approval kill switch active":
-            approval_db = path / "approval.sqlite"
+            approval_db = db
             approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
             approval_store.set_kill_switch(enabled=True, actor_role="approver", reason_code="KILL_SWITCH_ENABLED")
             try:
@@ -149,8 +150,9 @@ def run_case(name: str) -> Row:
                 return row
             raise AssertionError("kill switch should block approval issuance")
         elif name == "approval cannot override block":
-            approval_db = path / "approval.sqlite"
+            approval_db = db
             approval_store = ApprovalStore(approval_db, ttl_seconds=3600, clock=lambda: datetime.now(timezone.utc))
+            approval_store.set_kill_switch(enabled=False, actor_role="system")
             approval = approval_store.create_approval(intent=intent, context=CONTEXT)
             approval_store.set_kill_switch(enabled=True, actor_role="approver", reason_code="KILL_SWITCH_ENABLED")
             gateway = PaymentGateway(PaymentPolicy(store), store, store, None, kill_switch=approval_store)

@@ -359,23 +359,28 @@ def test_rejected_or_expired_approval_never_reaches_gateway(tmp_path, terminal_s
     assert approvals.get_approval(record.approval_id).status == terminal_state
 
 
-def test_kill_switch_activation_during_policy_blocks_before_claim(tmp_path):
-    intent = make_intent("operation_switch_before_claim")
-    approvals, payment_store = approved_fixture(tmp_path / "switch_before_claim.sqlite", intent)
-    evaluated, resume = Event(), Event()
-    base_policy = PaymentPolicy(payment_store, clock=lambda: NOW)
+def test_kill_switch_activation_before_atomic_admission_blocks_without_claim(tmp_path):
+    intent = make_intent("operation_switch_before_atomic_admission")
+    approvals, payment_store = approved_fixture(
+        tmp_path / "switch_before_atomic_admission.sqlite", intent
+    )
+    claim_entered, resume_claim = Event(), Event()
+    original_claim = payment_store.claim
 
-    class PausingPolicy:
-        def evaluate(self, request, context, *, advisory_signals=()):
-            decision = base_policy.evaluate(request, context, advisory_signals=advisory_signals)
-            evaluated.set()
-            if not resume.wait(timeout=5):
-                raise TimeoutError("test policy release timed out")
-            return decision
+    def pause_before_claim_transaction(
+        context, request, decision, *, require_kill_switch=False
+    ):
+        claim_entered.set()
+        if not resume_claim.wait(timeout=5):
+            raise TimeoutError("test claim release timed out")
+        return original_claim(
+            context, request, decision, require_kill_switch=require_kill_switch
+        )
 
+    payment_store.claim = pause_before_claim_transaction
     adapter = CountingAdapter()
     gateway = PaymentGateway(
-        PausingPolicy(),
+        PaymentPolicy(payment_store, clock=lambda: NOW),
         payment_store,
         payment_store,
         adapter,
@@ -384,9 +389,9 @@ def test_kill_switch_activation_during_policy_blocks_before_claim(tmp_path):
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(gateway.submit, intent, CONTEXT)
-        assert evaluated.wait(timeout=5)
+        assert claim_entered.wait(timeout=5)
         approvals.set_kill_switch(enabled=True, actor_role="approver")
-        resume.set()
+        resume_claim.set()
         result = future.result(timeout=5)
 
     assert result.status == "REJECTED"
@@ -398,6 +403,10 @@ def test_kill_switch_activation_during_policy_blocks_before_claim(tmp_path):
             "SELECT status FROM authorizations WHERE operation_id=?",
             (intent.operation_id,),
         ).fetchone()[0] == "issued"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM operation_events WHERE operation_id=? AND to_state='CLAIMED'",
+            (intent.operation_id,),
+        ).fetchone()[0] == 0
 
 
 def test_execution_admission_wins_before_switch_and_is_not_cancelled(tmp_path):
@@ -499,7 +508,7 @@ def test_missing_kill_switch_state_fails_closed(tmp_path, missing):
 @pytest.mark.parametrize("missing", ["table", "row"])
 def test_atomic_claim_rejects_missing_kill_switch_state(tmp_path, missing):
     intent = make_intent(f"operation_atomic_missing_switch_{missing}")
-    approvals, payment_store = approved_fixture(
+    _, payment_store = approved_fixture(
         tmp_path / f"atomic_missing_switch_{missing}.sqlite", intent
     )
     fingerprint = _fingerprint(intent, CONTEXT)
@@ -524,6 +533,66 @@ def test_atomic_claim_rejects_missing_kill_switch_state(tmp_path, missing):
             "SELECT state FROM operations WHERE operation_id=?",
             (intent.operation_id,),
         ).fetchone()[0] == "RESERVED"
+
+
+@pytest.mark.parametrize("action", ["create", "approve"])
+def test_missing_kill_switch_state_blocks_approval_mutations(tmp_path, action):
+    db = tmp_path / f"approval_missing_state_{action}.sqlite"
+    approvals = ApprovalStore(db, clock=lambda: NOW)
+    original_intent = make_intent(f"operation_missing_state_{action}")
+    record = approvals.create_approval(intent=original_intent, context=CONTEXT)
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM kill_switch WHERE key='payment_kill_switch'")
+
+    with pytest.raises(RuntimeError, match="kill switch state unavailable"):
+        if action == "create":
+            approvals.create_approval(
+                intent=make_intent(f"operation_missing_state_{action}_new"),
+                context=CONTEXT,
+            )
+        else:
+            approvals.approve_approval(
+                record.approval_id,
+                request_fingerprint=record.request_fingerprint,
+            )
+
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (original_intent.operation_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT status FROM approvals WHERE approval_id=?",
+            (record.approval_id,),
+        ).fetchone()[0] == "PENDING"
+
+
+def test_invalid_kill_switch_value_fails_closed(tmp_path):
+    intent = make_intent("operation_invalid_switch_state")
+    approvals, payment_store = approved_fixture(tmp_path / "invalid_switch_state.sqlite", intent)
+    with sqlite3.connect(payment_store.path) as conn:
+        conn.execute(
+            "UPDATE kill_switch SET enabled=2 WHERE key='payment_kill_switch'"
+        )
+    adapter = CountingAdapter()
+    gateway = PaymentGateway(
+        PaymentPolicy(payment_store, clock=lambda: NOW),
+        payment_store,
+        payment_store,
+        adapter,
+        kill_switch=approvals,
+    )
+
+    result = gateway.submit(intent, CONTEXT)
+
+    assert result.status == "REJECTED"
+    assert result.reason_codes == ("KILL_SWITCH_ACTIVE",)
+    assert adapter.calls == 0
+    with sqlite3.connect(payment_store.path) as conn:
+        assert conn.execute(
+            "SELECT status FROM authorizations WHERE operation_id=?",
+            (intent.operation_id,),
+        ).fetchone()[0] == "issued"
 
 
 def test_kill_switch_store_path_mismatch_fails_gateway_configuration(tmp_path):
