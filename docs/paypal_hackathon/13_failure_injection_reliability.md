@@ -29,6 +29,7 @@ The Day 13 suite adds focused regression coverage for the following scenarios:
 8. Rejected or expired approvals cannot reach the gateway.
 9. Kill-switch activation and execution admission are serialized through the shared SQLite database; activation-first blocks without consuming authorization, while admission-first is treated as in-flight.
 10. Malformed dashboard telemetry is ignored without exposure or crash.
+11. Manual demo authorization issuance checks the persisted kill switch in the same `BEGIN IMMEDIATE` transaction as insertion.
 
 Files added:
 - [tests/unit/test_day13_reliability.py](D:/AgentObservability/tests/unit/test_day13_reliability.py)
@@ -82,7 +83,7 @@ Commands executed:
 
 Observed results:
 
-- Full pytest suite: 289 tests collected and passed (exit code 0).
+- Full pytest suite: 295 tests collected and passed (exit code 0).
 - Attack suite: 22/22 scenarios passed, 0 PayPal calls.
 - Secret scan: no high-confidence credential signatures or credential-shaped historical filenames found.
 - Audit verification: VALID: 1 record checked for the safe temporary chain.
@@ -97,6 +98,7 @@ The focused regression run passed. The ordering tests use `Event` synchronizatio
 - Missing table/row and invalid-value tests verify fail-closed behavior at the gateway and inside the atomic claim; approval creation and authorization issuance also fail closed when switch state is missing.
 - A SQLite trigger-induced claim write failure leaves authorization `issued` and does not invoke the adapter.
 - Store-path mismatch is rejected during gateway construction.
+- The manual issuer tests cover active switch, missing switch row/table, invalid value, and unreadable database; all reject without inserting an authorization. The disabled-switch path runs through the CLI with the confirmation function accepted, inserts one exact-bound authorization, and preserves the 10-minute expiry.
 
 ## Known limitations
 
@@ -106,5 +108,5 @@ The focused regression run passed. The ordering tests use `Event` synchronizatio
 - `BEGIN IMMEDIATE` serializes switch activation with the authorization-claim transaction. If activation commits first, the claim observes the active switch and leaves authorization issued and the operation unclaimed. If claim commits first, authorization is consumed and the operation is admitted/in-flight; a later switch activation blocks subsequent admissions but cannot cancel this operation, including one whose adapter dispatch is still pending.
 - Missing, unreadable, or invalid kill-switch state fails closed. No database transaction is held during telemetry publication or adapter/provider execution.
 - The in-flight boundary does not promise cancellation of a request already admitted or dispatched. No actual PayPal request is sent or retried by these tests.
-- The final Day 13 verification for this change ran the full 289-test suite, all 22 offline attack scenarios, the repository secret scan, a one-record audit verification using a temporary SQLite database, and `git -c core.whitespace=cr-at-eol diff --check`; all passed.
+- The earlier Day 13 verification covered the full 289-test suite. The manual-issuer fix was separately verified with 295 tests collected and passing, 22/22 offline attack scenarios, and `git -c core.whitespace=cr-at-eol diff --check`; the manual-issuer tests use no provider transport.
 - Day 13 intentionally stops before any Day 14 work.

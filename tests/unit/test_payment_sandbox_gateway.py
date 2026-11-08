@@ -178,8 +178,10 @@ def test_advisory_escalates_allow_and_cannot_relax_block(tmp_path):
 
 def test_manual_issuer_binds_fields_without_a_provider_call(tmp_path):
     from scripts.issue_authorization import demo_context, issue_after_local_confirmation
+    from agentsentinel.approval_service import ApprovalStore
 
     db, store, spy, _, _ = setup(tmp_path)
+    ApprovalStore(db).set_kill_switch(enabled=False, actor_role="system")
     intent = make_intent().model_copy(update={"scope_id": demo_context().scope_id})
     record = issue_after_local_confirmation(db, intent)
     trusted = SQLitePaymentStore(db, trusted_issuer_id=record.issuer_id)

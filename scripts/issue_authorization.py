@@ -6,6 +6,7 @@ import hashlib
 import argparse
 import sqlite3
 import sys
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -54,9 +55,19 @@ def issue_after_local_confirmation(db: Path, intent: PaymentIntent) -> PaymentAu
         issued_at=now, expires_at=now + timedelta(minutes=10),
         status="issued", record_origin="application_issued",
     )
-    conn = sqlite3.connect(db, timeout=1, isolation_level=None)
+    try:
+        conn = sqlite3.connect(db, timeout=1, isolation_level=None)
+    except sqlite3.Error:
+        raise RuntimeError("authorization issuance unavailable") from None
     try:
         conn.execute("BEGIN IMMEDIATE")
+        switch = conn.execute(
+            "SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'"
+        ).fetchone()
+        if switch is None or type(switch[0]) is not int or switch[0] not in (0, 1):
+            raise RuntimeError("kill switch state unavailable")
+        if switch[0] == 1:
+            raise RuntimeError("authorization issuance blocked by kill switch")
         conn.execute("""INSERT INTO authorizations
             (authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,
              amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin)
@@ -67,8 +78,13 @@ def issue_after_local_confirmation(db: Path, intent: PaymentIntent) -> PaymentAu
              record.issued_at.isoformat(), record.expires_at.isoformat(), record.status,
              None, record.record_origin))
         conn.execute("COMMIT")
+    except sqlite3.Error:
+        with suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
+        raise RuntimeError("authorization issuance unavailable") from None
     except BaseException:
-        conn.execute("ROLLBACK")
+        with suppress(sqlite3.Error):
+            conn.execute("ROLLBACK")
         raise
     finally:
         conn.close()
