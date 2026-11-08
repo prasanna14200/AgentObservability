@@ -203,6 +203,9 @@ def test_operation_finalization_failure_stays_non_retryable(tmp_path):
         def reserve_intent(self, request, context, fingerprint):
             return payment_store.reserve_intent(request, context, fingerprint)
 
+        def mark_dispatch_intent(self, operation_id, fingerprint):
+            return payment_store.mark_dispatch_intent(operation_id, fingerprint)
+
         def finish(self, *args, **kwargs):
             raise OSError("database write failed after fake execution")
 

@@ -27,7 +27,7 @@ GatewayReason = Literal[
     "OPERATION_CONFLICT", "OPERATION_RESERVATION_FAILED", "OPERATION_IN_PROGRESS",
     "AUTHORIZATION_CONSUMPTION_FAILED", "EXECUTION_DISABLED", "PROVIDER_OUTCOME_UNCERTAIN",
     "OPERATION_FINALIZATION_FAILED", "RECONCILIATION_REQUIRED", "VERIFIED_COMPLETED", "VERIFIED_NO_PAYMENT",
-    "KILL_SWITCH_ACTIVE",
+    "KILL_SWITCH_ACTIVE", "RECOVERY_NOT_DISPATCHED", "DISPATCH_INTENT_FAILED",
 ]
 
 
@@ -114,6 +114,10 @@ class OperationStore(Protocol):
         """Atomically transition only a matching RESERVED operation to a terminal state."""
         ...
 
+    def mark_dispatch_intent(self, operation_id: str, fingerprint: str) -> bool:
+        """Durably mark that a provider request may be sent before adapter invocation."""
+        ...
+
 
 class InMemoryOperationStore:
     """Single-process test prototype; not durable, distributed, or crash-safe."""
@@ -135,9 +139,18 @@ class InMemoryOperationStore:
     def finish(self, operation_id: str, fingerprint: str, result: GatewayResult) -> None:
         with self._lock:
             existing = self._records.get(operation_id)
-            if existing is None or existing[0] != fingerprint or existing[1].state != "RESERVED":
+            if (existing is None or existing[0] != fingerprint
+                    or existing[1].state not in {"RESERVED", "CLAIMED"}):
                 raise RuntimeError("operation is not reserved")
             self._records[operation_id] = (fingerprint, Reservation(result.status, result))
+
+    def mark_dispatch_intent(self, operation_id: str, fingerprint: str) -> bool:
+        with self._lock:
+            existing = self._records.get(operation_id)
+            if (existing is None or existing[0] != fingerprint
+                    or existing[1].state != "RESERVED"):
+                return False
+            return True
 
 
 def _fingerprint(intent: PaymentIntent, context: AuthenticatedScope) -> str:
@@ -312,6 +325,17 @@ class PaymentGateway:
             if self._kill_switch_is_active():
                 return self._block_for_kill_switch(intent, fingerprint)
             return self._finalize(intent, fingerprint, decision, "REJECTED", "AUTHORIZATION_CONSUMPTION_FAILED")
+
+        try:
+            marked = self._operations.mark_dispatch_intent(intent.operation_id, fingerprint)
+        except Exception:
+            return self._finalize(
+                intent, fingerprint, decision, "REJECTED", "DISPATCH_INTENT_FAILED"
+            )
+        if marked is not True:
+            return self._finalize(
+                intent, fingerprint, decision, "REJECTED", "DISPATCH_INTENT_FAILED"
+            )
 
         self._publish_telemetry(
             build_payment_event(

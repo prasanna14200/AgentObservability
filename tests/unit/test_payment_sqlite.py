@@ -317,6 +317,7 @@ def test_verified_reconciliation_and_forged_input_rejected(tmp_path):
     repository.reserve_intent(request, CONTEXT, _fingerprint(request, CONTEXT))
     decision = PaymentPolicy(repository, clock=lambda: NOW).evaluate(request, CONTEXT)
     assert repository.claim(CONTEXT, request, decision)
+    assert repository.mark_dispatch_intent(request.operation_id, _fingerprint(request, CONTEXT))
     verifier = FakeVerifier()
     reconciler = SQLiteReconciler(store(db), verifier)
     forged = VerifiedOutcome(operation_id=request.operation_id, status="COMPLETED",
@@ -343,6 +344,7 @@ def test_mismatched_verified_evidence_cannot_finalize(tmp_path):
     repository.reserve_intent(request, CONTEXT, _fingerprint(request, CONTEXT))
     decision = PaymentPolicy(repository, clock=lambda: NOW).evaluate(request, CONTEXT)
     assert repository.claim(CONTEXT, request, decision)
+    assert repository.mark_dispatch_intent(request.operation_id, _fingerprint(request, CONTEXT))
     with pytest.raises(StoreUnavailable):
         SQLiteReconciler(store(db), FakeVerifier(wrong_key=True)).reconcile(request.operation_id)
     assert operation_row(db)[0] == "CLAIMED"
@@ -357,6 +359,7 @@ def test_capture_target_is_unverified_until_reconciliation(tmp_path):
     assert operation_row(db)[3] is None
     decision = PaymentPolicy(repository, clock=lambda: NOW).evaluate(request, CONTEXT)
     assert repository.claim(CONTEXT, request, decision)
+    assert repository.mark_dispatch_intent(request.operation_id, _fingerprint(request, CONTEXT))
     with pytest.raises(StoreUnavailable):
         SQLiteReconciler(repository, FakeVerifier(order_id="order_002", capture_id="capture_001")).reconcile(
             request.operation_id)

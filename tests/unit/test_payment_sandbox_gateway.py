@@ -201,7 +201,8 @@ def test_read_only_verifier_checks_capture_status_without_post(tmp_path):
     spy.order_status = "COMPLETED"
     before = len([call for call in spy.calls if call[0] == "POST"])
     snapshot = ReconciliationSnapshot(
-        operation_id=capture.operation_id, state="UNCERTAIN", action="capture_order",
+        operation_id=capture.operation_id, state="UNCERTAIN", dispatch_state="MAY_HAVE_DISPATCHED",
+        action="capture_order",
         merchant_id=MERCHANT, amount_text="1.00", currency="USD",
         target_order_id="ORDER123", attempt_id="attempt_001", idempotency_key=None,
         provider_order_id="ORDER123", provider_capture_id="CAPTURE123", fingerprint="f" * 64,

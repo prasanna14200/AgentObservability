@@ -21,7 +21,9 @@ from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoi
 from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
 from agentsentinel.approval_service import ApprovalStore  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, SandboxStatusVerifier  # noqa: E402
-from agentsentinel.payment_sqlite import SQLitePaymentStore, SQLiteReconciler  # noqa: E402
+from agentsentinel.payment_sqlite import (
+    PaymentRecoveryWorker, SQLitePaymentStore, SQLiteReconciler,
+)  # noqa: E402
 from agentsentinel.paypal_sandbox import (  # noqa: E402
     ID_RE, PayPalSandboxClient, SandboxConfig, SandboxError, UncertainOutcome, amount_usd, read_local_env,
 )
@@ -220,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
         DEMO_DB.parent.mkdir(parents=True, exist_ok=True)
         approvals = ApprovalStore(DEMO_DB)
         store = SQLitePaymentStore(DEMO_DB, trusted_issuer_id=DEMO_ISSUER)
+        PaymentRecoveryWorker(store).run_once()
 
         if args.command == "open-approval":
             audit = store.audit_operation(args.operation_id)
