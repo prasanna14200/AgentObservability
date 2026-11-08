@@ -154,6 +154,9 @@ class ApprovalStore:
     def _initialize(self) -> None:
         try:
             with closing(self._connect()) as conn:
+                existing_tables = conn.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                ).fetchone()[0]
                 conn.executescript(
                     """
                     CREATE TABLE IF NOT EXISTS approvals (
@@ -211,6 +214,11 @@ class ApprovalStore:
                     );
                     """
                 )
+                if existing_tables == 0:
+                    conn.execute(
+                        "INSERT INTO kill_switch(key,enabled,updated_at,reason_code) VALUES(?,?,?,?)",
+                        ("payment_kill_switch", 0, self._now().isoformat(), "KILL_SWITCH_DISABLED"),
+                    )
         except sqlite3.Error as exc:  # pragma: no cover - defensive
             raise RuntimeError("approval store initialization unavailable") from exc
 
@@ -494,7 +502,7 @@ class ApprovalStore:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM kill_switch WHERE key='payment_kill_switch'").fetchone()
         if row is None:
-            return KillSwitchState(enabled=False, updated_at=self._now(), reason_code="KILL_SWITCH_DISABLED")
+            raise RuntimeError("kill switch state unavailable")
         return KillSwitchState(
             enabled=bool(row["enabled"]),
             updated_at=datetime.fromisoformat(row["updated_at"]).astimezone(timezone.utc),

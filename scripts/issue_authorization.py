@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from agentsentinel.payment_policy import AuthenticatedScope  # noqa: E402
+from agentsentinel.approval_service import ApprovalStore  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore  # noqa: E402
 from agentsentinel.paypal_sandbox import SandboxConfig, amount_usd, read_local_env  # noqa: E402
 from agentsentinel.schema.payment import Money, PaymentAuthorization, PaymentIntent  # noqa: E402
@@ -97,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         intent = demo_intent(args.operation_id, config.merchant_id, value,
                              args.action, args.target_order_id)
         DEMO_DB.parent.mkdir(parents=True, exist_ok=True)
+        ApprovalStore(DEMO_DB)
         SQLitePaymentStore(DEMO_DB, trusted_issuer_id=DEMO_ISSUER)
         if not confirm_local_user(intent):
             print("No authorization issued.")

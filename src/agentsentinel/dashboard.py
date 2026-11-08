@@ -178,10 +178,13 @@ def _read_decision_counts(path: Path, since: str) -> dict[str, int] | None:
             return None
         rows = conn.execute(
             """
-            SELECT json_extract(canonical_event, '$.gateway_decision') AS decision, COUNT(*) AS count
+            SELECT CASE WHEN json_valid(canonical_event)
+                        THEN json_extract(canonical_event, '$.gateway_decision') END AS decision,
+                   COUNT(*) AS count
             FROM payment_audit_chain
             WHERE event_type='POLICY_EVALUATED'
-              AND json_extract(canonical_event, '$.timestamp') >= ?
+              AND CASE WHEN json_valid(canonical_event)
+                       THEN json_extract(canonical_event, '$.timestamp') END >= ?
             GROUP BY decision
             """,
             (since,),
@@ -200,7 +203,8 @@ def _read_outcome_counts(path: Path, since: str) -> dict[str, int] | None:
             SELECT event_type, COUNT(*) AS count
             FROM payment_audit_chain
             WHERE event_type IN ('PAYMENT_COMPLETED', 'PAYMENT_UNCERTAIN')
-              AND json_extract(canonical_event, '$.timestamp') >= ?
+              AND CASE WHEN json_valid(canonical_event)
+                       THEN json_extract(canonical_event, '$.timestamp') END >= ?
             GROUP BY event_type
             """,
             (since,),
@@ -292,8 +296,10 @@ def _read_trace_events(path: Path, trace_id: str) -> tuple[list[dict[str, Any]],
             """
             SELECT sequence_number,canonical_event
             FROM payment_audit_chain
-            WHERE json_extract(canonical_event, '$.trace_id')=?
-            ORDER BY json_extract(canonical_event, '$.timestamp'),sequence_number
+            WHERE CASE WHEN json_valid(canonical_event)
+                       THEN json_extract(canonical_event, '$.trace_id') END=?
+            ORDER BY CASE WHEN json_valid(canonical_event)
+                          THEN json_extract(canonical_event, '$.timestamp') END,sequence_number
             LIMIT ?
             """,
             (trace_id, _MAX_TRACE_EVENTS + 1),
@@ -352,21 +358,28 @@ def _read_trace_page(
             return [], 0
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         where = """
-            WHERE json_extract(canonical_event, '$.trace_id') IS NOT NULL
-              AND json_extract(canonical_event, '$.timestamp') >= ?
-              AND (?='' OR instr(json_extract(canonical_event, '$.trace_id'), ?) > 0
-                   OR instr(COALESCE(json_extract(canonical_event, '$.operation_id'), ''), ?) > 0)
+            WHERE CASE WHEN json_valid(canonical_event)
+                       THEN json_extract(canonical_event, '$.trace_id') END IS NOT NULL
+              AND CASE WHEN json_valid(canonical_event)
+                       THEN json_extract(canonical_event, '$.timestamp') END >= ?
+              AND (?='' OR instr(CASE WHEN json_valid(canonical_event)
+                                      THEN json_extract(canonical_event, '$.trace_id') END, ?) > 0
+                   OR instr(COALESCE(CASE WHEN json_valid(canonical_event)
+                                          THEN json_extract(canonical_event, '$.operation_id') END, ''), ?) > 0)
         """
         params = (since, search, search, search)
         total = int(conn.execute(
-            "SELECT COUNT(DISTINCT json_extract(canonical_event, '$.trace_id')) "
+            "SELECT COUNT(DISTINCT CASE WHEN json_valid(canonical_event) "
+            "THEN json_extract(canonical_event, '$.trace_id') END) "
             "FROM payment_audit_chain " + where,
             params,
         ).fetchone()[0] or 0)
         rows = conn.execute(
             """
-            SELECT json_extract(canonical_event, '$.trace_id') AS trace_id,
-                   MAX(json_extract(canonical_event, '$.timestamp')) AS latest
+            SELECT CASE WHEN json_valid(canonical_event)
+                        THEN json_extract(canonical_event, '$.trace_id') END AS trace_id,
+                   MAX(CASE WHEN json_valid(canonical_event)
+                            THEN json_extract(canonical_event, '$.timestamp') END) AS latest
             FROM payment_audit_chain
             """
             + where
@@ -390,7 +403,8 @@ def _read_alerts(path: Path, since: str) -> list[dict[str, str]]:
         rows = conn.execute(
             """
             SELECT canonical_event FROM payment_audit_chain
-            WHERE json_extract(canonical_event, '$.timestamp') >= ?
+            WHERE CASE WHEN json_valid(canonical_event)
+                       THEN json_extract(canonical_event, '$.timestamp') END >= ?
             ORDER BY sequence_number DESC LIMIT ?
             """,
             (since, _MAX_ALERT_EVENTS),

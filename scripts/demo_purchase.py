@@ -19,6 +19,7 @@ from issue_authorization import (  # noqa: E402
 
 from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoint  # noqa: E402
 from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
+from agentsentinel.approval_service import ApprovalStore  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, SandboxStatusVerifier  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SQLiteReconciler  # noqa: E402
 from agentsentinel.paypal_sandbox import (  # noqa: E402
@@ -217,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
         config = SandboxConfig.from_values(read_local_env(ROOT / ".env"))
         client = PayPalSandboxClient(config)
         DEMO_DB.parent.mkdir(parents=True, exist_ok=True)
+        approvals = ApprovalStore(DEMO_DB)
         store = SQLitePaymentStore(DEMO_DB, trusted_issuer_id=DEMO_ISSUER)
 
         if args.command == "open-approval":
@@ -267,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             issue_after_local_confirmation(DEMO_DB, intent)
         gateway = PaymentGateway(PaymentPolicy(store), store, store, SandboxPaymentAdapter(client),
-                                 enable_sandbox_execution=True)
+                                 enable_sandbox_execution=True, kill_switch=approvals)
         result = TrustedGatewayEntryPoint(gateway, DemoSession()).submit(intent)
         print(json.dumps(_safe_result(result, _local_snapshot(DEMO_DB, intent.operation_id)), sort_keys=True))
         return 0 if result.status == "COMPLETED" else 2

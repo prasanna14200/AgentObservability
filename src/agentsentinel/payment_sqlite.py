@@ -317,8 +317,15 @@ class SQLitePaymentStore:
         except Exception:
             raise StoreUnavailable("authorization lookup unavailable") from None
 
-    def claim(self, context: AuthenticatedScope, intent: PaymentIntent, decision: PolicyDecision) -> bool:
-        """One transaction consumes authorization and marks the reserved operation CLAIMED."""
+    def claim(
+        self,
+        context: AuthenticatedScope,
+        intent: PaymentIntent,
+        decision: PolicyDecision,
+        *,
+        require_kill_switch: bool = False,
+    ) -> bool:
+        """Atomically admit execution and consume authorization, including the switch check."""
         try:
             intent = PaymentIntent.model_validate(intent.model_dump(mode="python"))
             context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
@@ -336,6 +343,19 @@ class SQLitePaymentStore:
                 if (operation is None or operation["fingerprint"] != fingerprint
                         or operation["state"] != "RESERVED"):
                     return False
+                if require_kill_switch:
+                    has_kill_switch = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kill_switch'"
+                    ).fetchone()
+                    if has_kill_switch is None:
+                        raise StoreUnavailable("kill switch state unavailable")
+                    kill_switch = conn.execute(
+                        "SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'"
+                    ).fetchone()
+                    if kill_switch is None:
+                        raise StoreUnavailable("kill switch state unavailable")
+                    if bool(kill_switch["enabled"]):
+                        return False
                 row = conn.execute("""SELECT * FROM authorizations
                     WHERE principal_id=? AND scope_id=? AND intent_id=? AND operation_id=?""",
                     (context.principal_id, context.scope_id, intent.intent_id, intent.operation_id)).fetchone()

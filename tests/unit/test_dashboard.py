@@ -363,6 +363,31 @@ def test_audit_success_and_tampering_are_reported_as_live(tmp_path):
     assert "Live verification; result not persisted" in verify.text
 
 
+def test_malformed_telemetry_is_excluded_from_dashboard_queries(tmp_path):
+    telemetry = tmp_path / "telemetry.sqlite"
+    append_trace(
+        telemetry,
+        "trace_malformed",
+        "operation_malformed",
+        (("POLICY_EVALUATED", "BLOCK", ("AUTHORIZATION_MISSING",)),),
+    )
+    with sqlite3.connect(telemetry) as conn:
+        conn.execute(
+            "UPDATE payment_audit_chain SET canonical_event=? WHERE sequence_number=1",
+            ("{malformed and private payload}",),
+        )
+    client = TestClient(make_app(tmp_path))
+    sign_in(client)
+
+    overview = client.get("/dashboard")
+    traces = client.get("/dashboard/traces")
+
+    assert overview.status_code == traces.status_code == 200
+    assert "INVALID" in overview.text
+    assert "malformed and private payload" not in overview.text
+    assert "malformed and private payload" not in traces.text
+
+
 def test_demo_is_separate_and_does_not_issue_authorizations_or_call_paypal(tmp_path, monkeypatch):
     from agentsentinel.payment_gateway import PaymentGateway
 

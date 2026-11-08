@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Literal, Protocol
 
@@ -85,8 +86,15 @@ class SandboxOnlyAdapter(ABC):
 
 
 class AuthorizationConsumer(Protocol):
-    def claim(self, context: AuthenticatedScope, intent: PaymentIntent, decision: PolicyDecision) -> bool:
-        """Atomically recheck authoritative authorization and consume it once."""
+    def claim(
+        self,
+        context: AuthenticatedScope,
+        intent: PaymentIntent,
+        decision: PolicyDecision,
+        *,
+        require_kill_switch: bool = False,
+    ) -> bool:
+        """Atomically admit execution and consume its authoritative authorization."""
         ...
 
 
@@ -158,6 +166,17 @@ class PaymentGateway:
         self._enable_sandbox_execution = enable_sandbox_execution
         self._kill_switch = kill_switch
         self._telemetry_publisher = telemetry_publisher
+        if kill_switch is not None:
+            paths = tuple(getattr(dependency, "path", None) for dependency in
+                          (operations, consumer, kill_switch))
+            if any(path is None for path in paths):
+                raise ValueError("kill switch requires payment and approval stores with shared SQLite path")
+            try:
+                resolved_paths = tuple(Path(path).resolve() for path in paths)
+            except (OSError, TypeError, ValueError):
+                raise ValueError("kill switch store paths could not be verified") from None
+            if len(set(resolved_paths)) != 1:
+                raise ValueError("kill switch and payment stores must use the same SQLite database")
 
     def submit(
         self, intent: PaymentIntent, context: AuthenticatedScope,
@@ -260,36 +279,8 @@ class PaymentGateway:
                 return self._result(intent, None, "UNCERTAIN", "OPERATION_FINALIZATION_FAILED")
             return reservation.result
 
-        if self._kill_switch is not None:
-            try:
-                if bool(getattr(self._kill_switch, "is_kill_switch_active", lambda: False)()):
-                    decision = PolicyDecision(
-                        decision_id="decision_" + hashlib.sha256(
-                            f"{intent.operation_id}:kill_switch_active".encode("ascii")
-                        ).hexdigest()[:24],
-                        operation_id=intent.operation_id,
-                        outcome="BLOCK",
-                        reason_codes=("KILL_SWITCH_ACTIVE",),
-                        policy_version=POLICY_VERSION,
-                        evaluated_at=datetime.now(timezone.utc),
-                        audit_metadata=PolicyAudit(authorization_lookup="skipped"),
-                    )
-                    self._publish_decision_event(intent, decision)
-                    return self._finalize(intent, fingerprint, decision, "REJECTED", "KILL_SWITCH_ACTIVE")
-            except Exception:
-                decision = PolicyDecision(
-                    decision_id="decision_" + hashlib.sha256(
-                        f"{intent.operation_id}:kill_switch_read_error".encode("ascii")
-                    ).hexdigest()[:24],
-                    operation_id=intent.operation_id,
-                    outcome="BLOCK",
-                    reason_codes=("KILL_SWITCH_ACTIVE",),
-                    policy_version=POLICY_VERSION,
-                    evaluated_at=datetime.now(timezone.utc),
-                    audit_metadata=PolicyAudit(authorization_lookup="skipped"),
-                )
-                self._publish_decision_event(intent, decision)
-                return self._finalize(intent, fingerprint, decision, "REJECTED", "KILL_SWITCH_ACTIVE")
+        if self._kill_switch_is_active():
+            return self._block_for_kill_switch(intent, fingerprint)
 
         try:
             decision = self._policy.evaluate(intent, context, advisory_signals=advisory_signals)
@@ -301,15 +292,25 @@ class PaymentGateway:
         if decision.outcome == "REVIEW":
             return self._finalize(intent, fingerprint, decision, "REVIEW_REQUIRED", "POLICY_REVIEW")
 
+        if self._kill_switch_is_active():
+            return self._block_for_kill_switch(intent, fingerprint)
+
         # Real Sandbox execution requires an explicit trusted application opt-in.
         sandbox_enabled = self._enable_sandbox_execution and isinstance(self._adapter, SandboxOnlyAdapter)
         if self._adapter is None or not (isinstance(self._adapter, TestOnlyAdapter) or sandbox_enabled):
             return self._finalize(intent, fingerprint, decision, "REJECTED", "EXECUTION_DISABLED")
         try:
-            consumed = self._consumer.claim(context, intent, decision)
+            if self._kill_switch is None:
+                consumed = self._consumer.claim(context, intent, decision)
+            else:
+                consumed = self._consumer.claim(
+                    context, intent, decision, require_kill_switch=True
+                )
         except Exception:
             consumed = False
         if consumed is not True:
+            if self._kill_switch_is_active():
+                return self._block_for_kill_switch(intent, fingerprint)
             return self._finalize(intent, fingerprint, decision, "REJECTED", "AUTHORIZATION_CONSUMPTION_FAILED")
 
         self._publish_telemetry(
@@ -325,6 +326,7 @@ class PaymentGateway:
                 actor_role="application",
             )
         )
+
         try:
             outcome = self._adapter.execute(intent)
             if not isinstance(outcome, AdapterOutcome):
@@ -341,6 +343,32 @@ class PaymentGateway:
             return self._finalize(intent, fingerprint, decision, "UNCERTAIN", "PROVIDER_OUTCOME_UNCERTAIN")
         reason = "EXECUTED_SANDBOX" if sandbox_enabled else "EXECUTED_FAKE"
         return self._finalize(intent, fingerprint, decision, "COMPLETED", reason, outcome=outcome)
+
+    def _kill_switch_is_active(self) -> bool:
+        if self._kill_switch is None:
+            return False
+        read_state = getattr(self._kill_switch, "is_kill_switch_active", None)
+        if not callable(read_state):
+            return True
+        try:
+            return bool(read_state())
+        except Exception:
+            return True
+
+    def _block_for_kill_switch(self, intent: PaymentIntent, fingerprint: str) -> GatewayResult:
+        decision = PolicyDecision(
+            decision_id="decision_" + hashlib.sha256(
+                f"{intent.operation_id}:kill_switch_active".encode("ascii")
+            ).hexdigest()[:24],
+            operation_id=intent.operation_id,
+            outcome="BLOCK",
+            reason_codes=("KILL_SWITCH_ACTIVE",),
+            policy_version=POLICY_VERSION,
+            evaluated_at=datetime.now(timezone.utc),
+            audit_metadata=PolicyAudit(authorization_lookup="skipped"),
+        )
+        self._publish_decision_event(intent, decision)
+        return self._finalize(intent, fingerprint, decision, "REJECTED", "KILL_SWITCH_ACTIVE")
 
     def _publish_decision_event(self, intent: PaymentIntent, decision: PolicyDecision) -> None:
         self._publish_telemetry(
