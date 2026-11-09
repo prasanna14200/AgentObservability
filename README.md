@@ -1,44 +1,148 @@
 # AgentSentinel
 
-AgentSentinel is an **offline AI-agent observability and anomaly-detection prototype**. It currently generates labeled synthetic customer-support tool-call traces, validates and redacts trace records, writes accepted/rejected local JSONL, preprocesses events, builds contextual features, and evaluates deterministic anomaly rules against a scikit-learn Isolation Forest.
+AgentSentinel is a **production-shaped prototype**, not a production payment
+service. It combines an offline AI-agent trace detector experiment with a
+separate PayPal Sandbox payment-control prototype. The payment flow demonstrates
+trusted authorization, deterministic policy, human review, a kill switch,
+durable operation state, auditability, and a gateway boundary around a payment
+adapter. The default demonstration uses only an in-process fake adapter.
 
-The planned PayPal Sandbox purchase assistant is **not implemented**. There is no payment tool, live interception gateway, authorization policy, human review, or dashboard. Detector scores are advisory and must not authorize payments. The latest corrected synthetic evaluation still **fails Gate C** because Isolation Forest's held-out false-positive rate is 56.9%, above the registered 10% ceiling. See [Stage 2 verification](docs/paypal_hackathon/02_pipeline_verification.md).
+## What is implemented
 
-## Run the offline pipeline (PowerShell)
+- **Offline detection:** synthetic customer-support traces, schema validation,
+  redaction, preprocessing, contextual features, rules, and Isolation Forest.
+  The learned detector **fails Gate C**: its held-out false-positive rate is
+  56.9%, above the preregistered 10% ceiling. Its score is not a payment
+  authorization decision.
+- **Payment safety prototype:** a `PaymentIntent` proposal passes through a
+  trusted gateway, exact-bound authorization and policy checks, approval and
+  kill-switch controls, an operation store, and a protected adapter. A person
+  must use the documented approval path; an agent proposal does not authorize
+  a payment.
+- **Agent demonstration:** a LangGraph purchase agent can use a scripted
+  proposer or an already-installed local Ollama model. It receives no payment
+  credentials or authorization-issuance capability. Detector advisories are
+  optional inputs and cannot override a deterministic `BLOCK`.
+- **Local operations prototype:** authenticated localhost approval and
+  dashboard routes, allowlisted payment telemetry, a local SHA-256 audit chain,
+  crash recovery, and reconciliation. These features are not a hosted or
+  production-ready control plane.
 
-Use Python 3.10 or newer. From the repository root:
+## Architecture
+
+```mermaid
+flowchart LR
+  U[User request] --> A[Agent / proposal only]
+  C[Untrusted catalog text] --> A
+  A --> I[Validated PaymentIntent]
+  I --> T[TrustedGatewayEntryPoint]
+  X[Authenticated application context] --> T
+  T --> G[PaymentGateway]
+  G --> P[Deterministic policy and authorization]
+  G --> H[Approval service and kill switch]
+  P --> D{BLOCK / REVIEW / ALLOW}
+  H --> D
+  D -->|ALLOW only| S[Durable operation claim]
+  S --> PA[Protected payment adapter]
+  PA --> PP[PayPal Sandbox API, manual path only]
+  G --> E[Payment telemetry]
+  E --> L[SQLite event and hash-chain audit]
+  Q[Optional trusted detector advisor] -. REVIEW signal only .-> T
+  R[Dashboard] --> L
+  R --> H
+```
+
+In the normal offline demo, the provider is a fake adapter and the PayPal
+Sandbox node is not contacted. The guard decorator is an integration
+convenience, **not a Python sandbox**. Python code in the same process must be
+trusted; private-object introspection is not prevented. Do not expose provider
+adapters or credentials to untrusted agent code.
+
+## Quickstart (PowerShell)
+
+Requires Python 3.10+ and Git. The install includes the declared `dev`, `agent`,
+and `day10` optional dependency groups. No `.env`, PayPal credentials, Ollama
+server, or model download is needed for these commands.
 
 ```powershell
+git clone https://github.com/prasanna14200/AgentObservability.git
+Set-Location AgentObservability
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-$env:PYTHONPATH = "src"
-python scripts/evaluate_offline.py
-python -m pytest -o addopts='' -q
+.\.venv\Scripts\python.exe -m pip install -e ".[dev,agent,day10]"
+.\.venv\Scripts\python.exe scripts\evaluate_offline.py
+.\.venv\Scripts\python.exe -m pytest -o addopts= -q
+.\.venv\Scripts\python.exe scripts\run_attack_suite.py
+.\.venv\Scripts\python.exe scripts\demo_side_by_side.py
 ```
 
-`scripts/evaluate_offline.py` regenerates synthetic v3 traces (seed `20260818`), processed v4 events, and v4 features; trains Isolation Forest on normal training traces (seed `42`); and prints held-out metrics. It calls no external payment service. `pyproject.toml` is the dependency declaration; `requirements.txt` is an empty historical file. Generated `data/processed/` files are ignored. Historical synthetic data, feature artifacts, notebooks, research, and model cards remain in the repository.
+Run the evaluation before the full suite: it generates ignored synthetic
+processed data used by one feature test. On the verified Python 3.10.11
+environment, the fresh-clone sequence produced:
 
-## Current architecture
+- Evaluation exit 0; 620 traces and 1,831 events; `gate_c_pass: false`.
+- Full tests: **331 passed**, one Starlette/AnyIO deprecation warning, exit 0.
+- Attack suite: **22/22 passed**, no live PayPal calls.
+- Side-by-side demo exit 0:
 
-```text
-synthetic traces / local collector
-          -> Pydantic schema + key-based redaction
-          -> preprocessing -> chronological split
-          -> baselines fitted on normal training rows
-          -> rules + Isolation Forest -> offline evaluation
+  | Path | Decision | Status | Reason | Fake money moved |
+  |---|---|---|---|---:|
+  | Unprotected mock | ALLOW | COMPLETED | UNPROTECTED_MOCK_ONLY | USD 9.00 |
+  | AgentSentinel | BLOCK | REJECTED | AUTHORIZATION_MERCHANT_MISMATCH | USD 0.00 |
+
+These are observed local results, not a guarantee for every platform. The
+offline evaluation is synthetic and separate from payment safety. Its
+customer-support Isolation Forest result is PR-AUC 0.706 and FPR 56.9%; the
+rules baseline is PR-AUC 0.463 and FPR 0%. Gate C therefore fails the registered
+10% FPR ceiling.
+
+## Optional local Ollama experiment
+
+This experiment requires Ollama and the named model to already be installed.
+The script does not download a model. It is not part of the default quickstart:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_local_llm_trials.py --model qwen2.5:1.5b
 ```
 
-The collector records what happened; it does not intercept or authorize tool calls. The permission-match feature is an offline diagnostic inferred from training traces, not a trusted permission policy. Redaction is key-based and does not make the current trace store suitable for payment credentials.
+In the recorded five-trial run, all five local proposals changed the merchant
+or amount in response to poisoned catalog text. The gateway blocked all five
+with `AUTHORIZATION_MERCHANT_MISMATCH`; the mock moved USD 0.00. This is a
+small controlled experiment with one model, not a prompt-injection coverage or
+model robustness claim.
 
-## Hackathon work and provenance
+## PayPal Sandbox boundary
 
-- [Hackathon scope and verified rules](docs/hackathon_scope.md)
-- [12-stage progress](docs/paypal_hackathon/PROGRESS.md)
-- [Stage 1 audit](docs/paypal_hackathon/01_repository_audit.md) and [Stage 2 verification](docs/paypal_hackathon/02_pipeline_verification.md)
-- [Gate C preregistration](docs/gate_c_preregistration.md), [model cards](models/model_cards/), and [source registry](research/sources.yaml)
+The source implements PayPal REST calls for OAuth
+(`POST /v1/oauth2/token`), Orders
+(`POST /v2/checkout/orders`, `GET /v2/checkout/orders/{id}`, and
+`POST /v2/checkout/orders/{id}/capture`), and capture lookup
+(`GET /v2/payments/captures/{id}`). The ordinary quickstart, tests, attack
+suite, evaluation, and side-by-side demo use no PayPal transport. The separate
+manual Sandbox walkthrough in
+[Day 7 documentation](docs/paypal_hackathon/07_end_to_end_gateway.md) can make
+real Sandbox requests when explicitly configured and run; do not run it as part
+of the offline demo.
 
-The intended hackathon addition is a protected PayPal **Sandbox** purchase flow. It will keep payment authorization separate from telemetry and anomaly scores. Do not place sandbox credentials in Git, issue trackers, chat, traces, or screenshots. `.env.example` contains placeholders only; copy it to an ignored `.env` when later stages need local credentials.
+Day 7 Order A remains unresolved: subsequent read-only provider GETs returned
+HTTP 404, so its outcome is not claimed. A separate Order B capture was
+independently verified through read-only order and capture GETs. See the
+[troubleshooting record](docs/paypal_hackathon/07_sandbox_404_troubleshooting.md).
+
+## Reproducibility and limitations
+
+- [Demo runbook](docs/DEMO_RUNBOOK.md)
+- [Master Phase 0–29 reconciliation and feature audit](docs/ROADMAP_RECONCILIATION.md)
+- [Devpost draft](docs/devpost_description.md)
+- [Video script](docs/video_script.md)
+- [Hackathon Day handoffs and status](docs/paypal_hackathon/PROGRESS.md)
+- [Day 14 guard quickstart](docs/paypal_hackathon/14_quickstart.md)
+
+The GitHub repository currently has no configured Actions workflows, so there
+is no hosted CI result to report. Use the local commands above. SQLite, local
+process boundaries, and the audit chain are prototype controls: this project
+does not promise external exactly-once payment execution, cancellation of an
+already admitted provider call, tamper-proof audit storage, production
+authentication, or isolation of arbitrary Python code.
 
 ## License
 

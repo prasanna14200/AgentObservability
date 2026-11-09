@@ -1,6 +1,10 @@
 # PayPal hackathon implementation progress
 
-Updated: 2026-10-29. The statuses below refer to the **new 12 stages**, not the original master-plan phase numbers.
+Updated: final-stretch reconciliation. The first table refers only to the
+separate **12-stage checklist**; the Hackathon Day handoffs below use their
+own numbering. Neither label is a Master Phase number. See
+[`ROADMAP_RECONCILIATION.md`](../ROADMAP_RECONCILIATION.md) for the original
+Master Phase 0–29 status.
 
 | Stage | Stage name | Status | Existing files reused | Files changed | Tests and evidence | Remaining work |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -14,8 +18,8 @@ Updated: 2026-10-29. The statuses below refer to the **new 12 stages**, not the 
 | 8 | Transaction reliability | PARTIAL (Day 7–8 local prototype) | Day 5 policy and Day 6 gateway | `src/agentsentinel/payment_sqlite.py`; payment tests; `07_durable_payment_safety.md`; `08_attack_suite.md`; this file | SQLite reservation, atomic claim, restart/reconciliation, attempt limits, atomic capture budgets, and offline spy suite | Production authentication, deployment controls, and network ambiguity handling beyond manual review |
 | 9 | Human approval | COMPLETE (Day 10 local prototype) | REVIEW decision, payment records, approval service, audit events | `src/agentsentinel/approval_service.py`; `src/agentsentinel/templates/approvals.html`; `docs/paypal_hackathon/10_human_approval.md`; `tests/unit/test_approval_service.py` | Durable approval queue, approver auth, kill switch, browser-safe approval UI, local-only audit and expiry checks | Keep the service local-only; add richer approval UX only with explicit approval |
 | 10 | Dashboard | COMPLETE (Day 12 local prototype) | Day 10 approval service/UI and Day 11 telemetry, collector, audit, and detectors | `src/agentsentinel/dashboard.py`; dashboard Jinja templates; `tests/unit/test_dashboard.py`; `12_security_dashboard.md` | Authenticated local Control Center, read-only overview/traces/alerts, controlled approval/kill-switch actions, live read-only audit verification, isolated synthetic walkthrough | Local prototype only; no external auth, public hosting, or production payment execution |
-| 11 | End-to-end tests | NOT STARTED | All implemented components | — | — | Scenarios, evaluation report, known limitations |
-| 12 | Submission preparation | NOT STARTED | Docs and system artifacts | — | — | README, diagram, setup, env template, license, demo plan, current rules verification |
+| 11 | End-to-end tests | PARTIAL | Local payment components and offline fixtures | Existing unit/integration suites and attack suite | 331 pytest tests passed after generating the ignored offline feature fixture; 22/22 attack scenarios passed; no production provider integration suite | Keep provider behavior and deployment boundaries explicit; the full four-detector and end-to-end production evaluation is not complete |
+| 12 | Submission preparation | IN PROGRESS | Existing architecture, demo, evaluation, and Day 1 scope docs | `README.md`, `docs/ROADMAP_RECONCILIATION.md`, `docs/DEMO_RUNBOOK.md`, `docs/devpost_description.md`, `docs/video_script.md` | Fresh-clone install, evaluation, full tests, mock demo, and offline attack suite verified; see the reconciliation and runbook | Entrant must record/publish the required short video and complete Devpost submission; final release checks are separate |
 
 The older 12-stage checklist above records Stage 3 schema, Stage 4 policy, a Stage 5 fake-only gateway prototype, and partial Stage 8 local reliability work. Stage 7 full PayPal integration remains incomplete; the Day 2 Sandbox proof of concept does not complete it.
 
@@ -69,4 +73,14 @@ Day 12 implements a localhost-only authenticated Jinja2 dashboard using read-onl
 
 ## Crash recovery and reconciliation Day 14
 
-Day 14 adds a durable `NOT_DISPATCHED` / `MAY_HAVE_DISPATCHED` marker, a bounded local startup recovery pass, and conservative read-only reconciliation. Claim remains the kill-switch-serialized execution-admission boundary: an operation admitted before a later switch activation is in-flight and cannot be cancelled by that switch. Recovery atomically records state changes with `operation_events`, does not issue authorization or retry, and keeps possibly dispatched operations uncertain unless trusted evidence is bound to the exact operation, attempt, and idempotency key. Focused recovery tests passed 26/26; full pytest passed 321 tests with one third-party deprecation warning; the offline attack suite passed 22/22 with zero PayPal calls. Secret scan, isolated temporary audit verification, and `git diff --check` passed. Detailed evidence, guarantee, and limitations are in [14_crash_recovery_reconciliation.md](./14_crash_recovery_reconciliation.md). The Day 14 changes are local and uncommitted; no push was attempted.
+Day 14 adds a durable `NOT_DISPATCHED` / `MAY_HAVE_DISPATCHED` marker, a bounded local startup recovery pass, and conservative read-only reconciliation. Claim remains the kill-switch-serialized execution-admission boundary: an operation admitted before a later switch activation is in-flight and cannot be cancelled by that switch. Recovery atomically records state changes with `operation_events`, does not issue authorization or retry, and keeps possibly dispatched operations uncertain unless trusted evidence is bound to the exact operation, attempt, and idempotency key. Focused recovery tests passed 26/26; the complete suite later passed 331 tests with one third-party deprecation warning; the offline attack suite passed 22/22 with zero PayPal calls. The Day 14 deliverables are committed in `60382aa` and were verified on public `main`; see [14_crash_recovery_reconciliation.md](./14_crash_recovery_reconciliation.md). No claim of provider exactly-once execution is made.
+
+## Final-stretch verification and submission material
+
+The original Master Phase 0–29 roadmap, 14-item hackathon feature audit,
+fresh-clone findings, verified offline commands, current Gate C failure,
+latency sample, known Order A outcome, and remaining submission work are
+consolidated in [`ROADMAP_RECONCILIATION.md`](../ROADMAP_RECONCILIATION.md).
+The reproducible safe demo is in [`DEMO_RUNBOOK.md`](../DEMO_RUNBOOK.md).
+`README.md`, `docs/devpost_description.md`, and `docs/video_script.md` are
+submission drafts and do not claim a video or Devpost entry has been published.
