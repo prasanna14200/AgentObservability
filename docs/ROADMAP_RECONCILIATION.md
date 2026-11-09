@@ -87,12 +87,28 @@ readiness.
 
 ## Hackathon Day evidence
 
-The current handoffs classify Hackathon Day 9 as an offline purchase-agent
-prototype, Day 10 as local human approval and kill-switch controls, Day 11 as
-payment observability/advisory detectors, Day 12 as a localhost dashboard, Day
-13 as local failure-injection/reliability work, and Day 14 as guard integration
-and crash recovery. Those labels do not imply completion of the similarly
-numbered Master Phases or entries in the 12-stage checklist.
+The handoffs and repository history show this Hackathon Day progression:
+
+| Hackathon Day | Handoff and Git evidence | Verified scope / caveat |
+|---:|---|---|
+| 1 | `01_repository_audit.md`, `docs/hackathon_scope.md`; `a3a41d7` | Baseline, source registry, license, and audit preparation. Not functional payment integration. |
+| 2 | `02_sandbox_rest_spike.md`; `9251330` | Isolated REST spike and historical manually reported Sandbox order/capture. Not an agent-accessible tool or the later gateway. |
+| 3 | `03_mcp_feasibility.md`; `0368f65` | Hosted MCP discovery feasibility; tool listing only. No optional MCP execution demo. |
+| 4 | `04_payment_schema.md`; `b06c4d6` | Payment data contracts; no authority from parsed payloads. |
+| 5 | `05_payment_policy.md`; `589c35c` | Deterministic ALLOW/REVIEW/BLOCK policy. |
+| 6 | `06_safety_gateway.md`; `bb94ce9` | Fake-only gateway prototype. |
+| 7 | `07_end_to_end_gateway.md`, `07_durable_payment_safety.md`; `f858829`, `da9c6be` | Local SQLite payment safety and manual Sandbox walking skeleton. Order A remains unresolved; a separate Order B capture was independently verified in its handoff. |
+| 8 | `08_attack_suite.md`; `e18d14d` | Offline attack cases and SQLite attempt/budget limits. |
+| 9 | `09_purchase_agent.md`; `bb34d46` | LangGraph purchase proposal agent with scripted and optional local Ollama modes; side-by-side fake demo. The five recorded local trials were blocked by the gateway after following poisoned catalog text. |
+| 10 | `10_human_approval.md`; `0777b31` | Local durable approval queue, auth/CSRF, approval UI, atomic issuance, kill switch, and audit events. |
+| 11 | `11_payment_observability.md`; `7374ddc`, `41d5232` | Payment telemetry, optional advisory adapters, synthetic detector evaluation, and local SQLite hash chain. Detector and publisher wiring remain optional. |
+| 12 | `12_security_dashboard.md`; `0bdebd5` | Authenticated localhost dashboard and synthetic offline walkthrough. |
+| 13 | `13_failure_injection_reliability.md`; `c863820`, `0a58124` | Local failure/reliability tests and recorded microbenchmarks. Current benchmark script fails during approval setup, so its historical measurements are not newly reproduced. |
+| 14 | `14_crash_recovery_reconciliation.md`, `14_quickstart.md`; `60382aa` | Durable dispatch marker, conservative recovery, and `@guard` integration. Does not sandbox same-process Python or promise provider exactly-once execution. |
+
+These are Hackathon Day labels only; they do not imply completion of similarly
+numbered Master Phases or entries in the 12-stage checklist. The complete
+chronological handoff is in [`PROGRESS.md`](paypal_hackathon/PROGRESS.md).
 
 The recorded Day 9 five-trial local Ollama experiment followed poisoned catalog
 text in all five proposals; the gateway blocked each with
@@ -121,8 +137,11 @@ complete.
 
 ## Release evidence and limitations
 
-- Fresh clone from public `origin/main`, isolated Python 3.10.11 environment,
-  and install with `.[dev,agent,day10]` succeeded. No `.env` was present.
+- Fresh clone from public `origin/main` at `60382aa`, isolated Python 3.10.11
+  environment, and install with `.[dev,agent,day10]` succeeded. The public
+  checkout predates this local final-stretch documentation commit, so its
+  checked-out README was stale; the install command was run as specified in
+  the updated local README/runbook. No `.env` was present.
 - Running `scripts/evaluate_offline.py` first generated the ignored fixture
   required by one test. Then full pytest passed **331 tests** with one
   third-party deprecation warning; the mock demo passed.

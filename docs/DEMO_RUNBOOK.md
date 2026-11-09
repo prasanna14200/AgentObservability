@@ -21,11 +21,14 @@ needed for the following commands. `scripts/evaluate_offline.py` creates
 ignored processed data required by one full-suite feature test; run it before
 pytest.
 
-Fresh-clone verification initially omitted the `day10` extra and pytest
-collection failed because `fastapi` was not installed. Installing the declared
-`dev`, `agent`, and `day10` groups resolved that import failure. A subsequent
-clean clone also confirmed that the evaluation command must precede pytest to
-create `data\processed\v4\traces.parquet`; no generated fixture is tracked.
+The verified public clone was at commit `60382aa` (the then-current
+`origin/main`) and therefore contained the older README; this local
+final-stretch README/runbook supplies the tested install command. Fresh-clone
+verification initially omitted the `day10` extra and pytest collection failed
+because `fastapi` was not installed. Installing the declared `dev`, `agent`,
+and `day10` groups resolved that import failure. The clean clone also
+confirmed that the evaluation command must precede pytest to create
+`data\processed\v4\traces.parquet`; no generated fixture is tracked.
 
 ## 2. Run the offline baseline and tests
 
