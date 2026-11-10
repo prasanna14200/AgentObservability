@@ -1,0 +1,41 @@
+services:
+  app:
+    image: agentsentinel-local:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    init: true
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      APPROVAL_DB_PATH: /app/data/paypal_sandbox/gateway_demo.sqlite
+    volumes:
+      - agentsentinel_data:/app/data
+    secrets:
+      - approver_secret
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2).read()"
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
+secrets:
+  approver_secret:
+    file: ./secrets/approver_secret
+
+volumes:
+  agentsentinel_data:

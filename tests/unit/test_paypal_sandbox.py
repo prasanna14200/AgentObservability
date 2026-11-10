@@ -27,9 +27,14 @@ class FakeTransport:
     def __init__(self, *responses):
         self.responses = list(responses)
         self.calls = []
+        self.last_bearer_authorization = None
 
     def request(self, method, path, headers, body):
-        self.calls.append((method, path, headers, body))
+        captured_headers = headers.copy()
+        if path != "/v1/oauth2/token":
+            self.last_bearer_authorization = headers.get("Authorization")
+            captured_headers["Authorization"] = "******"
+        self.calls.append((method, path, captured_headers, body))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
@@ -50,7 +55,7 @@ def test_mock_oauth_and_create_request():
     assert fake.calls[0][2]["Authorization"].startswith("Basic ")
     method, path, headers, body = fake.calls[1]
     assert (method, path) == ("POST", "/v2/checkout/orders")
-    assert headers["Authorization"] == "Bearer private-token"
+    assert fake.last_bearer_authorization == "Bearer private-token"
     assert headers["PayPal-Request-Id"] == request_id(CONFIG.merchant_id, "create", "purchase-001")
     assert json.loads(body) == {"intent": "CAPTURE", "purchase_units": [{
         "reference_id": "purchase-001", "amount": {"currency_code": "USD", "value": "1.00"},

@@ -13,7 +13,15 @@ adapter. The default demonstration uses only an in-process fake adapter.
   redaction, preprocessing, contextual features, rules, and Isolation Forest.
   The learned detector **fails Gate C**: its held-out false-positive rate is
   56.9%, above the preregistered 10% ceiling. Its score is not a payment
-  authorization decision.
+  authorization decision. A separate trace-level 60/20/20 validation
+global calibration measured 16.4% test FPR. A task-group threshold selected
+only on validation measured 9.16% aggregate FPR and 60.7% recall on the
+synthetic test set, but its trace-bootstrap interval extends above 10% and
+one task group measured 13.2% FPR.
+A zero-validation-FPR threshold detected no test anomalies (0/89), while
+the rules baseline detected 25/89 with zero observed false positives in
+262 normal events. These synthetic results do not qualify a production
+detector. See the [ML evaluation](docs/ML_EVALUATION.md).
 - **Payment safety prototype:** a `PaymentIntent` proposal passes through a
   trusted gateway, exact-bound authorization and policy checks, approval and
   kill-switch controls, an operation store, and a protected adapter. A person
@@ -95,6 +103,65 @@ customer-support Isolation Forest result is PR-AUC 0.706 and FPR 56.9%; the
 rules baseline is PR-AUC 0.463 and FPR 0%. Gate C therefore fails the registered
 10% FPR ceiling.
 
+To start the localhost-only approval service and dashboard after installing
+the `day10` optional dependencies:
+
+```powershell
+.\.venv\Scripts\python.exe run.py
+```
+
+Set `APPROVER_SECRET` in the process environment or enter a value of at least
+32 characters when the hidden-input prompt appears. The startup command never
+prints the secret and strips PayPal-related variables from the service
+process. Visit `http://127.0.0.1:8000/dashboard`; do not expose this prototype
+to a public network. `/health` is liveness; `/ready` checks only local
+approval-store kill-switch availability.
+
+## Local Docker demo (SQLite prototype only)
+
+The local Compose profile binds the dashboard to loopback and stores current
+SQLite payment, approval, and telemetry data in a named Docker volume. It does
+not include PayPal credentials, enable Sandbox dispatch, or use PostgreSQL.
+This is a reproducible local demo container, not the production deployment
+architecture. The PostgreSQL migration boundary and safe cutover requirements
+are documented in [the migration plan](docs/POSTGRESQL_MIGRATION_PLAN.md).
+
+Create a separate local approver secret file without displaying its value:
+
+```powershell
+New-Item -ItemType Directory -Force secrets | Out-Null
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$bytes = New-Object byte[] 48
+$rng.GetBytes($bytes)
+[System.IO.File]::WriteAllText(
+    (Join-Path $PWD 'secrets\approver_secret'),
+    [Convert]::ToBase64String($bytes)
+)
+[Array]::Clear($bytes, 0, $bytes.Length)
+$rng.Dispose()
+Remove-Variable rng, bytes
+```
+
+Build and run locally:
+
+```powershell
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+Open `http://127.0.0.1:8000`. The app uses a read-only container filesystem,
+non-root user, dropped Linux capabilities, a read-only mounted secret, and a
+persistent named volume. Do not run `docker compose down -v` unless you
+intentionally want to delete all local demo state. The Compose health check
+only exercises the current SQLite `/ready` endpoint; it is not production
+dependency monitoring or a backup check. Docker build/runtime has not been
+verified on this workstation because the Docker Engine is unavailable.
+
+The volume is local persistence, not a backup. No restore drill, PostgreSQL
+backend, or public deployment is implemented. Do not put PayPal credentials in
+the approver-secret file or pass provider secrets to this container.
+
 ## Optional local Ollama experiment
 
 This experiment requires Ollama and the named model to already be installed.
@@ -134,6 +201,7 @@ independently verified through read-only order and capture GETs. See the
 - [Master Phase 0–29 reconciliation and feature audit](docs/ROADMAP_RECONCILIATION.md)
 - [Security threat model](docs/SECURITY_THREAT_MODEL.md)
 - [Configuration and deployment boundary](docs/CONFIGURATION.md)
+- [Validation-calibrated ML evaluation](docs/ML_EVALUATION.md)
 - [Devpost draft](docs/devpost_description.md)
 - [Video script](docs/video_script.md)
 - [Hackathon Day handoffs and status](docs/paypal_hackathon/PROGRESS.md)

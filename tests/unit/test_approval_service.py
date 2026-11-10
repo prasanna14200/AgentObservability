@@ -60,6 +60,9 @@ def test_fastapi_service_requires_bearer_auth_and_kill_switch_state(tmp_path, mo
     client = TestClient(app)
 
     assert client.get("/health").status_code == 200
+    ready = client.get("/ready")
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready"}
     assert client.get("/approvals").status_code == 401
 
     resp = client.get("/approvals", headers={"Authorization": "Bearer " + "a" * 32})
@@ -88,6 +91,20 @@ def test_fastapi_service_requires_bearer_auth_and_kill_switch_state(tmp_path, mo
                 intent=make_intent(operation_id="op_approval_003"),
                 context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
             )
+
+
+def test_readiness_fails_when_persisted_kill_switch_state_is_unavailable(tmp_path):
+    db_path = tmp_path / "readiness.sqlite"
+    app = create_app(db_path=db_path, approver_secret="d" * 40)
+    client = TestClient(app)
+
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("DELETE FROM kill_switch WHERE key='payment_kill_switch'")
+
+    response = client.get("/ready")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service not ready"}
+    assert client.get("/health").status_code == 200
 
 
 def test_approval_store_issuance_is_atomic_under_concurrency(tmp_path):

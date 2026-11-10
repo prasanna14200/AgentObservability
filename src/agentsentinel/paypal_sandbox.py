@@ -148,6 +148,9 @@ class PayPalSandboxClient:
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         if body is not None:
             headers["Content-Type"] = "application/json"
+        if self._token is None:
+            raise SandboxError("Sandbox OAuth token unavailable")
+        headers["Authorization"] = f"Bearer {self._token}"
         if key:
             headers["PayPal-Request-Id"] = key
         payload = json.dumps(body, separators=(",", ":")).encode() if body is not None else None

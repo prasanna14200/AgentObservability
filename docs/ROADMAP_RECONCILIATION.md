@@ -39,13 +39,13 @@ demonstration were not started as part of this final-stretch work.
 | 17 | MCP integration | **PARTIAL** — a feasibility/discovery spike exists; no optional MCP demo or payment tool execution was implemented here. |
 | 18 | Human-in-the-loop | **PARTIAL** — local payment approval workflow exists; no production identity system or external review operation. |
 | 19 | Dashboard | **PARTIAL** — authenticated localhost dashboard and decision-reason view exist; no hosted operations console. |
-| 20 | Database design | **PARTIAL** — local SQLite stores and migrations/state handling exist; no production PostgreSQL design or deployed database. |
-| 21 | Evaluation | **PARTIAL** — offline synthetic evaluations exist, but Gate C fails and the full four-detector comparison is not implemented. |
+| 20 | Database design | **PARTIAL** — local SQLite stores exist; a PostgreSQL migration/cutover/backup plan is documented, but no PostgreSQL adapter or migration is implemented. |
+| 21 | Evaluation | **PARTIAL / REGISTERED GATE C FAILED** — the original 80/20 protocol reports 56.9% Isolation Forest FPR. Follow-up task-group thresholds, selected only on validation, measure 9.16% aggregate test FPR and 60.7% recall, but the trace-bootstrap interval reaches 12.68% and one task group is at 13.2%. Zero-validation-FPR threshold has 0% recall; fixed rules have 0/262 false positives and 28.1% recall. Synthetic-data limits and the full four-detector comparison remain. See [ML_EVALUATION.md](ML_EVALUATION.md). |
 | 22 | Failure injection | **PARTIAL** — offline failure and attack tests exist; they do not prove provider-level behavior or production resilience. |
 | 23 | Security | **PARTIAL** — local security tests, a value-suppressing secret scanner, fail-closed malformed telemetry verification, and documented boundaries exist; no independent security assessment or production security certification. |
 | 24 | MLOps | **NOT STARTED** — no model lifecycle, deployment, or drift-monitoring system. |
-| 25 | Testing | **PARTIAL** — the current local Day 17 worktree passed 399 pytest tests after offline fixture generation; this is not production or external-provider integration coverage. |
-| 26 | Docker | **NOT STARTED**. |
+| 25 | Testing | **PARTIAL** — the current `milestone-local-hardening` worktree passed 422 pytest tests; this is not production or external-provider integration coverage. |
+| 26 | Docker | **PARTIAL** — a hash-locked, digest-pinned, loopback-only SQLite demo profile is prepared and Compose syntax passed; Docker Engine was unavailable, so image build/runtime are unverified. |
 | 27 | Deployment | **NOT STARTED**. |
 | 28 | Optimization | **PARTIAL** — older local offline microbenchmarks are recorded, but the current benchmark script fails during approval setup because the persisted kill-switch row is unavailable. No current p50/p95 result is claimed, and there is no production/load optimization evidence. |
 | 29 | Repository structure | **PARTIAL** — package, tests, scripts, docs, and artifacts are organized; a formal completion handoff for this phase is not evidenced. |
@@ -56,7 +56,7 @@ demonstration were not started as part of this final-stretch work.
 |---|---|---|
 | A — Data | **PASS for the synthetic baseline** | The corrected evaluation has 620 traces / 1,831 events (500 normal and 120 anomalous). Synthetic labels do not establish real-world prevalence. |
 | B — Baselines | **PASS** | Rules and Isolation Forest run on the held-out synthetic split. |
-| C — Detector | **FAIL** | Current reproduced rules PR-AUC 0.463 / FPR 0%; Isolation Forest PR-AUC 0.706 / FPR 56.9%. Registered FPR ceiling is 10%. Rules remain the safer operational baseline. |
+| C — Detector | **FAIL (registered); LIMITED FOLLOW-UP PASS** | Original protocol: rules PR-AUC 0.463 / FPR 0%; Isolation Forest PR-AUC 0.706 / FPR 56.9%. Global 10%-validation-cap follow-up: test FPR 16.4%, recall 67.4%. Task-group validation thresholds: aggregate test FPR 9.16%, recall 60.7%, precision 69.2%, with a trace-bootstrap FPR interval up to 12.68%; `address_change` test FPR is 13.2%. A zero-validation-FPR threshold gives 0% recall; rules give FPR 0/262 and recall 28.1%. The synthetic sample does not qualify a production detector or establish the target robustly. |
 | D — Runtime | **PARTIAL** | Local payment gateway can block, review, or allow a guarded fake/manual Sandbox operation. No general production runtime deployment. |
 | E — Reliability | **PARTIAL** | Offline tests cover local database, malformed audit rows, kill switch, duplicate, uncertainty, and recovery cases. Provider/network guarantees remain outside local SQLite; backup/restore and production recovery evidence are missing. |
 | F — Demo | **PARTIAL** | Side-by-side poisoned-proposal demo and 22-case offline attack suite run. The complete original normal/loop/cost/exfiltration demo set is not shown as a single end-to-end user workflow. |
@@ -107,7 +107,7 @@ The handoffs and repository history show this Hackathon Day progression:
 | 13 | `13_failure_injection_reliability.md`; `c863820`, `0a58124` | Local failure/reliability tests and recorded microbenchmarks. Current benchmark script fails during approval setup, so its historical measurements are not newly reproduced. |
 | 14 | `14_crash_recovery_reconciliation.md`, `14_quickstart.md`; `60382aa` | Durable dispatch marker, conservative recovery, and `@guard` integration. Does not sandbox same-process Python or promise provider exactly-once execution. |
 | 16 | `PROGRESS.md`; `d51edfa` | Local audit-checkpoint and dashboard-resilience remediation; does not provide an independently administered remote trust anchor. |
-| 17 | `PROGRESS.md`; uncommitted on `day18-release-readiness` | Malformed SQLite telemetry validation and dashboard degradation tests; local evidence only, not a production security certification. |
+| 17 | `PROGRESS.md`; included in `af11478` | Malformed SQLite telemetry validation and dashboard degradation tests; local evidence only, not a production security certification. |
 
 These are Hackathon Day labels only; they do not imply completion of similarly
 numbered Master Phases or entries in the 12-stage checklist. The complete
@@ -140,17 +140,22 @@ complete.
 
 ## Release evidence and limitations
 
-- On 2026-11-10, the Day 17 malformed-telemetry remediation was validated in an
-  uncommitted worktree based on `d51edfa` on branch
-  `day18-release-readiness`: focused audit/dashboard/approval tests **88
-  passed**; full pytest **399 passed** with one third-party deprecation
-  warning; compileall passed; the offline attack suite passed **22/22** with
-  zero PayPal calls; the secret scanner covered 186 worktree files and 382
-  reachable history blobs with no high-confidence credential findings; and
-  CRLF-aware `git diff --check` passed. Regression tests exercise malformed
-  SQLite storage classes and confirm all affected authenticated dashboard
-  routes withhold unverified telemetry while approval state stays available.
-  The code and documentation changes are not committed or pushed.
+- On 2026-11-10, the current `milestone-local-hardening` branch is based on
+  `af11478` from
+  `day18-release-readiness`; Day 17 malformed-telemetry code is already
+  committed in that baseline. Current worktree validation: **422 pytest
+  passed** (including 27 focused ML split/calibration tests);
+  compileall passed; the offline attack suite passed **22/22** with zero
+  PayPal calls; `pip check` reported no broken requirements; the secret scan
+  covered 191 worktree files and 404 reachable history blobs with no
+  high-confidence findings; CRLF-aware `git diff --check` and
+  `docker compose config --quiet` passed. Docker build/runtime remain
+  unverified because Docker Engine is unavailable. The task-group ML
+  threshold measured 9.16% aggregate test FPR with a 5.88–12.68% trace
+  bootstrap interval; the global threshold measured 16.4%. A local `/ready`
+  check and hidden approver-secret startup were added. Sandbox auth is
+  verified only with a fake transport. No external Sandbox request, deployment,
+  commit, or push was performed; current changes remain uncommitted.
 - Fresh clone from public `origin/main` at `60382aa`, isolated Python 3.10.11
   environment, and install with `.[dev,agent,day10]` succeeded. The public
   checkout predates this local final-stretch documentation commit, so its

@@ -93,15 +93,34 @@ verified zero activity. The authenticated overview, trace list, trace detail,
 and alerts routes retain a generic warning while independent approval state
 remains available.
 
-On 2026-11-10, branch `day18-release-readiness` was created at the unchanged
-Day 16 commit with the existing Day 17 worktree edits preserved. In that
-worktree, focused audit/dashboard/approval tests passed `88`; the full suite
-passed `399`; compileall passed; the offline attack suite passed `22/22` with
-zero PayPal calls; the secret scan covered 186 worktree files and 382 reachable
-history blobs with no high-confidence credential findings; and the
-CRLF-aware diff check passed. The changes are uncommitted. These results
-validate only the local offline prototype and do not close production
-identity, process isolation, provider, ML, backup, or deployment gates.
+On 2026-11-10, the actual milestone branch is `milestone-local-hardening` at
+`af11478` (`stage16`); Day 17 remediation is already in this committed
+baseline, with Day 16 commit `d51edfa` in its history. Current uncommitted
+work adds validation-only per-task ML calibration, strict split-input
+validation, hash-pinned container dependencies, a local SQLite Compose profile,
+a PostgreSQL migration plan, hidden-input localhost startup, and a store-backed
+`/ready` check. Validation: full suite `422 passed` with one third-party
+deprecation warning; focused ML split/calibration tests passed `27`; compileall
+passed; the offline attack suite passed `22/22` with zero PayPal calls;
+`pip check` reported no broken requirements; secret scan covered 191 worktree
+files and 404 reachable history blobs with no high-confidence findings;
+CRLF-aware diff check and `docker compose config --quiet` passed. Docker
+build/runtime remain unverified because Docker Engine is unavailable. The
+Sandbox bearer header was verified only with a fake transport. No external
+Sandbox request, deployment, commit, or push occurred. Production identity,
+process isolation, provider, PostgreSQL, backup/restore, and deployment gates
+remain open.
+
+The validation-calibrated ML experiment uses a chronological 60/20/20 trace
+split, fits baselines and Isolation Forest on normal training data, and selects
+global and task-group thresholds on validation only. Task-group calibration
+measured 9.16% aggregate test FPR (24/262), 60.7% recall, and 69.2% precision;
+its trace-bootstrap 95% FPR interval extends to 12.68%, and the
+`address_change` subgroup measured 13.2% FPR. The global 10%-cap threshold
+measured 16.4% test FPR. The zero-validation-FPR threshold detects 0/89
+anomalies; fixed rules measured 0/262 false positives with 28.1% recall.
+These synthetic results do not qualify production use. Detector output
+remains advisory. See [ML_EVALUATION.md](../ML_EVALUATION.md).
 
 ## Final-stretch verification and submission material
 

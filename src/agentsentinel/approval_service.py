@@ -839,6 +839,17 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/ready")
+    def readiness() -> dict[str, str]:
+        try:
+            store.read_kill_switch()
+        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="service not ready",
+            ) from None
+        return {"status": "ready"}
+
     @app.get("/approvals")
     async def approvals(request: Request, status: str | None = None) -> Any:
         _require_bearer(request, approver_secret)
