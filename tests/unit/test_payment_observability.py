@@ -243,6 +243,139 @@ def test_audit_chain_success_edit_and_reordering_detection(tmp_path):
     assert reordered.first_broken_sequence == 1
 
 
+@pytest.mark.parametrize(
+    ("column", "expression"),
+    [
+        ("event_timestamp", "CAST('not a timestamp' AS BLOB)"),
+        ("actor_role", "CAST('application' AS BLOB)"),
+        ("record_id", "CAST('operation_001' AS BLOB)"),
+        ("sequence_number", "CAST('1' AS BLOB)"),
+        ("previous_record_hash", "CAST('0000' AS BLOB)"),
+        ("canonical_event", "CAST('{}' AS BLOB)"),
+        ("event_type", "17"),
+        ("current_record_hash", "CAST('hash' AS BLOB)"),
+    ],
+)
+def test_audit_malformed_sqlite_storage_classes_fail_closed(tmp_path, column, expression):
+    chain = PaymentAuditChain(tmp_path / "malformed.sqlite")
+    chain.append(make_event())
+
+    with sqlite3.connect(chain.path) as conn:
+        if column == "sequence_number":
+            row = conn.execute(
+                "SELECT sequence_number,previous_record_hash,canonical_event,event_timestamp,"
+                "event_type,actor_role,record_id,current_record_hash "
+                "FROM payment_audit_chain WHERE sequence_number=1"
+            ).fetchone()
+            conn.execute("DROP TABLE payment_audit_chain")
+            conn.execute(
+                "CREATE TABLE payment_audit_chain ("
+                "sequence_number, previous_record_hash, canonical_event, event_timestamp, "
+                "event_type, actor_role, record_id, current_record_hash)"
+            )
+            conn.execute("INSERT INTO payment_audit_chain VALUES(?,?,?,?,?,?,?,?)", row)
+        conn.execute(
+            f"UPDATE payment_audit_chain SET {column}={expression} WHERE sequence_number=1"
+        )
+
+    result = chain.verify()
+
+    assert not result.valid
+    assert result.records_checked == 0
+    assert result.first_broken_sequence == 1
+    assert result.reason_code in {"INVALID_ROW", "INVALID_EVENT"}
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "sequence_number",
+        "previous_record_hash",
+        "canonical_event",
+        "event_timestamp",
+        "event_type",
+        "actor_role",
+        "record_id",
+        "current_record_hash",
+    ],
+)
+def test_audit_null_required_values_fail_closed(tmp_path, column):
+    chain = PaymentAuditChain(tmp_path / "null.sqlite")
+    chain.append(make_event())
+
+    with sqlite3.connect(chain.path) as conn:
+        row = conn.execute(
+            "SELECT sequence_number,previous_record_hash,canonical_event,event_timestamp,"
+            "event_type,actor_role,record_id,current_record_hash "
+            "FROM payment_audit_chain WHERE sequence_number=1"
+        ).fetchone()
+        conn.execute("DROP TABLE payment_audit_chain")
+        conn.execute(
+            "CREATE TABLE payment_audit_chain ("
+            "sequence_number, previous_record_hash, canonical_event, event_timestamp, "
+            "event_type, actor_role, record_id, current_record_hash)"
+        )
+        values = list(row)
+        values[
+            {
+                "sequence_number": 0,
+                "previous_record_hash": 1,
+                "canonical_event": 2,
+                "event_timestamp": 3,
+                "event_type": 4,
+                "actor_role": 5,
+                "record_id": 6,
+                "current_record_hash": 7,
+            }[column]
+        ] = None
+        conn.execute(
+            "INSERT INTO payment_audit_chain VALUES(?,?,?,?,?,?,?,?)", values
+        )
+
+    result = chain.verify()
+
+    assert not result.valid
+    assert result.reason_code == "INVALID_ROW"
+    assert result.first_broken_sequence == 1
+
+
+@pytest.mark.parametrize("timestamp", ["not-a-timestamp", "0001-01-01T00:00:00-23:00"])
+def test_audit_malformed_timestamp_text_fails_closed(tmp_path, timestamp):
+    chain = PaymentAuditChain(tmp_path / "bad_timestamp.sqlite")
+    chain.append(make_event())
+
+    with sqlite3.connect(chain.path) as conn:
+        conn.execute(
+            "UPDATE payment_audit_chain SET event_timestamp=? WHERE sequence_number=1",
+            (timestamp,),
+        )
+
+    result = chain.verify()
+
+    assert not result.valid
+    assert result.reason_code == "INVALID_ROW"
+
+
+@pytest.mark.parametrize("sequence_number", [1, 2])
+def test_audit_malformed_rows_in_any_chain_position_fail_closed(tmp_path, sequence_number):
+    chain = PaymentAuditChain(tmp_path / "multiple_rows.sqlite")
+    chain.append(make_event("evt_multi_001"))
+    chain.append(make_event("evt_multi_002", "POLICY_EVALUATED"))
+
+    with sqlite3.connect(chain.path) as conn:
+        conn.execute(
+            "UPDATE payment_audit_chain SET actor_role=CAST('application' AS BLOB) "
+            "WHERE sequence_number=?",
+            (sequence_number,),
+        )
+
+    result = chain.verify()
+
+    assert not result.valid
+    assert result.reason_code == "INVALID_ROW"
+    assert result.first_broken_sequence == sequence_number
+
+
 @pytest.mark.parametrize("records_to_delete", [1, 2])
 def test_audit_checkpoint_detects_deleted_tail_records(tmp_path, records_to_delete):
     db = tmp_path / "audit.sqlite"

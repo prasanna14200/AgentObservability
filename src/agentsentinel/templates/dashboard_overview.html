@@ -104,6 +104,7 @@
               <tr><td>{{ alert.timestamp }}</td><td>{{ alert.kind }}</td><td>{{ alert.label }}</td><td>{{ alert.trace_id }}</td><td>{{ alert.details }}</td></tr>
             {% endfor %}</tbody>
           </table></div>
+        {% elif telemetry_warning %}<p class="muted">Alert data is withheld while telemetry is unavailable.</p>
         {% else %}<p class="muted">No alert data in this time range.</p>{% endif %}
       </section>
       <p class="footer-note">Dashboard data is observational. Detector alerts are advisory and are not confirmed fraud. Deterministic policy and the gateway remain authoritative.</p>

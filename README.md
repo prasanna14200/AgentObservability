@@ -132,6 +132,8 @@ independently verified through read-only order and capture GETs. See the
 
 - [Demo runbook](docs/DEMO_RUNBOOK.md)
 - [Master Phase 0–29 reconciliation and feature audit](docs/ROADMAP_RECONCILIATION.md)
+- [Security threat model](docs/SECURITY_THREAT_MODEL.md)
+- [Configuration and deployment boundary](docs/CONFIGURATION.md)
 - [Devpost draft](docs/devpost_description.md)
 - [Video script](docs/video_script.md)
 - [Hackathon Day handoffs and status](docs/paypal_hackathon/PROGRESS.md)

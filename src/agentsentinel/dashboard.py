@@ -622,7 +622,7 @@ def _telemetry_warning(audit: dict[str, Any]) -> str | None:
     if audit["status"] == "Unavailable":
         return "Telemetry is unavailable. Counts and alerts are withheld; payment and approval state remain available."
     if audit["status"] == "INVALID":
-        return "Telemetry integrity verification failed. Counts and alerts are withheld; payment and approval state remain available."
+        return "Telemetry is unavailable because integrity verification failed. Counts and alerts are withheld; payment and approval state remain available."
     if audit["status"] == "No data":
         return "No telemetry database is available. Payment and approval state are shown independently."
     return None

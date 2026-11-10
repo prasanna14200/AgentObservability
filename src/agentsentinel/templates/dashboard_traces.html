@@ -17,7 +17,11 @@
         <input type="hidden" name="page_size" value="{{ page_size }}" />
         <button class="button" type="submit">Search</button>
       </form>
-      <p class="muted">Showing up to {{ page_size }} traces per page · {{ total }} matching traces · bounded to {{ days }} days. Reasons and identifiers come from the allowlisted telemetry schema.</p>
+      {% if telemetry_warning %}
+        <p class="muted">Trace results and counts are withheld while telemetry is unavailable.</p>
+      {% else %}
+        <p class="muted">Showing up to {{ page_size }} traces per page · {{ total }} matching traces · bounded to {{ days }} days. Reasons and identifiers come from the allowlisted telemetry schema.</p>
+      {% endif %}
       {% if traces %}
         <div class="table-wrap"><table>
           <thead><tr><th>Trace ID</th><th>Operation ID</th><th>Latest event</th><th>Action</th><th>Decision</th><th>Reason codes</th><th>Provider outcome</th><th>Anomaly signal</th></tr></thead>
@@ -29,12 +33,15 @@
             </tr>
           {% endfor %}</tbody>
         </table></div>
+      {% elif telemetry_warning %}<section class="empty-state"><h2>Trace data withheld</h2><p>Trace results cannot be verified while telemetry is unavailable.</p></section>
       {% else %}<section class="empty-state"><h2>No data</h2><p>No persisted traces matched this search and time range.</p></section>{% endif %}
-      <div class="pagination">
-        {% if page > 1 %}<a class="button subtle" href="/dashboard/traces?q={{ q }}&days={{ days }}&page_size={{ page_size }}&page={{ page - 1 }}">Previous</a>{% endif %}
-        <span>Page {{ page }} of {{ pages }}</span>
-        {% if page < pages %}<a class="button subtle" href="/dashboard/traces?q={{ q }}&days={{ days }}&page_size={{ page_size }}&page={{ page + 1 }}">Next</a>{% endif %}
-      </div>
+      {% if not telemetry_warning %}
+        <div class="pagination">
+          {% if page > 1 %}<a class="button subtle" href="/dashboard/traces?q={{ q }}&days={{ days }}&page_size={{ page_size }}&page={{ page - 1 }}">Previous</a>{% endif %}
+          <span>Page {{ page }} of {{ pages }}</span>
+          {% if page < pages %}<a class="button subtle" href="/dashboard/traces?q={{ q }}&days={{ days }}&page_size={{ page_size }}&page={{ page + 1 }}">Next</a>{% endif %}
+        </div>
+      {% endif %}
       <p class="footer-note">No amount, merchant purpose, prompt text, credentials, or raw provider payload is displayed.</p>
     </main>
   </body>

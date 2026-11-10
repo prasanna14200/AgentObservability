@@ -10,6 +10,7 @@ import sqlite3
 import tempfile
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Literal
 
@@ -318,27 +319,81 @@ class PaymentAuditChain:
     def _verify_rows(self, rows: list[sqlite3.Row]) -> PaymentAuditVerification:
         previous_hash = ZERO_HASH
         for expected_sequence, row in enumerate(rows, start=1):
-            sequence = int(row["sequence_number"])
+            sequence_value = row["sequence_number"]
+            if type(sequence_value) is not int:
+                return PaymentAuditVerification(
+                    False, expected_sequence - 1, expected_sequence, "INVALID_ROW"
+                )
+            sequence = sequence_value
             if sequence != expected_sequence:
                 return PaymentAuditVerification(False, expected_sequence - 1, expected_sequence, "SEQUENCE_GAP")
+
+            text_fields = (
+                "previous_record_hash",
+                "canonical_event",
+                "event_timestamp",
+                "event_type",
+                "actor_role",
+                "record_id",
+                "current_record_hash",
+            )
+            if any(type(row[field]) is not str for field in text_fields):
+                return PaymentAuditVerification(
+                    False, expected_sequence - 1, sequence, "INVALID_ROW"
+                )
+            if (
+                not _HASH.fullmatch(row["previous_record_hash"])
+                or not _HASH.fullmatch(row["current_record_hash"])
+            ):
+                return PaymentAuditVerification(
+                    False, expected_sequence - 1, sequence, "INVALID_ROW"
+                )
             try:
                 parsed_event = json.loads(row["canonical_event"])
                 if self.canonical_json(parsed_event) != row["canonical_event"]:
                     return PaymentAuditVerification(False, expected_sequence - 1, sequence, "NONCANONICAL_EVENT")
-                PaymentTelemetryEvent.model_validate(parsed_event)
-            except (json.JSONDecodeError, ValueError, TypeError):
+                event = PaymentTelemetryEvent.model_validate(parsed_event)
+            except (json.JSONDecodeError, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
                 return PaymentAuditVerification(False, expected_sequence - 1, sequence, "INVALID_EVENT")
+
+            try:
+                recorded_timestamp = datetime.fromisoformat(row["event_timestamp"])
+                normalized_timestamp = recorded_timestamp.astimezone(timezone.utc).isoformat()
+            except (ValueError, TypeError, OverflowError):
+                return PaymentAuditVerification(
+                    False, expected_sequence - 1, sequence, "INVALID_ROW"
+                )
+            expected_timestamp = event.timestamp.isoformat()
+            expected_actor_role = event.actor_role or "application"
+            expected_record_id = event.approval_id or event.operation_id or event.event_id
+            if (
+                recorded_timestamp.tzinfo is None
+                or recorded_timestamp.utcoffset() is None
+                or normalized_timestamp != row["event_timestamp"]
+                or row["event_timestamp"] != expected_timestamp
+                or row["event_type"] != event.event_type
+                or row["actor_role"] != expected_actor_role
+                or row["record_id"] != expected_record_id
+            ):
+                return PaymentAuditVerification(
+                    False, expected_sequence - 1, sequence, "INVALID_ROW"
+                )
             if row["previous_record_hash"] != previous_hash:
                 return PaymentAuditVerification(False, expected_sequence - 1, sequence, "PREVIOUS_HASH_MISMATCH")
-            calculated = self._record_hash(
-                sequence_number=sequence,
-                previous_record_hash=row["previous_record_hash"],
-                canonical_event=row["canonical_event"],
-                event_timestamp=row["event_timestamp"],
-                event_type=row["event_type"],
-                actor_role=row["actor_role"],
-                record_id=row["record_id"],
-            )
+            try:
+                calculated = self._record_hash(
+                    sequence_number=sequence,
+                    previous_record_hash=row["previous_record_hash"],
+                    canonical_event=row["canonical_event"],
+                    event_timestamp=row["event_timestamp"],
+                    event_type=row["event_type"],
+                    actor_role=row["actor_role"],
+                    record_id=row["record_id"],
+                )
+            except (json.JSONDecodeError, ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+                return PaymentAuditVerification(
+                    False, expected_sequence - 1, sequence, "INVALID_ROW"
+                )
             if calculated != row["current_record_hash"]:
                 return PaymentAuditVerification(False, expected_sequence - 1, sequence, "RECORD_HASH_MISMATCH")
             previous_hash = calculated
@@ -353,11 +408,9 @@ class PaymentAuditChain:
             "FROM payment_audit_chain ORDER BY sequence_number"
         ).fetchall()
         verification = self._verify_rows(rows)
-        head = (
-            (0, ZERO_HASH)
-            if not rows
-            else (int(rows[-1]["sequence_number"]), str(rows[-1]["current_record_hash"]))
-        )
+        if not verification.valid or not rows:
+            return (0, ZERO_HASH), verification
+        head = (rows[-1]["sequence_number"], rows[-1]["current_record_hash"])
         return head, verification
 
     def _recover_checkpoint(self, conn: sqlite3.Connection) -> None:

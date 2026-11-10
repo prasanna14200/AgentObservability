@@ -25,4 +25,4 @@ Run: `python scripts/run_attack_suite.py`. Spy calls count only the attack attem
 | approval stale expiry | BLOCK | BLOCK | approval expired | 0 | PASS |
 | advisory anomaly cannot override block | BLOCK | BLOCK | AUTHORIZATION_AMOUNT_MISMATCH | 0 | PASS |
 | telemetry failure cannot authorize | BLOCK | BLOCK | AUTHORIZATION_MISSING | 0 | PASS |
-| tampered audit record detected | BLOCK | BLOCK | RECORD_HASH_MISMATCH | 0 | PASS |
+| tampered audit record detected | BLOCK | BLOCK | INVALID_ROW | 0 | PASS |

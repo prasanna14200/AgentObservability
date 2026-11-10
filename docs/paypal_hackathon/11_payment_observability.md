@@ -25,7 +25,7 @@ The existing `TraceCollector`, strict trace model, redaction helpers, rules engi
 
 Each event carries an event ID, schema version, UTC timestamp, trace/span/parent-span IDs where available, operation and intent IDs, optional approval ID, action, event type, gateway decision, safe reason codes, measured duration, provider outcome category, and optional detector score/version. Proposal → policy → dispatch → outcome spans use stable IDs derived from the trace and operation. The audit sequence is the authoritative event order when timestamps coincide. An approval shares the same trace and operation IDs as its payment; its approval ID is included on approval events.
 
-The schema is an allowlist: it contains no amount, merchant, purpose, raw provider response, URL, credential, token, or unnecessary personal data. Invalid events are rejected without storing their payload. Safe rejection codes are kept in memory, logged, and written to a minimal rejection JSONL record. A collector outage is reported by the publisher and does not change policy, approval, authorization, kill-switch, or dispatch decisions. The existing deterministic controls remain authoritative.
+The schema is an allowlist: it includes bounded amount and currency fields, but no merchant, purpose, raw provider response, URL, credential, token, or unnecessary personal data. Invalid events are rejected without storing their payload. Safe rejection codes are kept in memory, logged, and written to a minimal rejection JSONL record. A collector outage is reported by the publisher and does not change policy, approval, authorization, kill-switch, or dispatch decisions. The existing deterministic controls remain authoritative.
 
 ## Detector integration
 

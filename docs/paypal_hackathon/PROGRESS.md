@@ -79,9 +79,33 @@ Day 14 adds a durable `NOT_DISPATCHED` / `MAY_HAVE_DISPATCHED` marker, a bounded
 
 Day 15 is **COMPLETE as a local, fake-adapter integration prototype**, not as a production payment system. The trusted purchase gateway evaluates policy before execution; hard `BLOCK` remains absolute, while `REVIEW` creates a durable request bound to the exact payment intent. Authenticated approval issues one exact authorization transactionally; the gateway re-evaluates, consumes it once, checks the kill switch at claim and dispatch-marker admission, then invokes the protected adapter at most once. Uncertain dispatches remain non-retryable pending reconciliation. Persisted payment/approval events and operation state appear on the dashboard. Validation: focused integration tests `13 passed`; compile check passed; full pytest `348 passed` with one third-party deprecation warning; offline attack suite `22/22`; secret scan covered 186 worktree files and 337 reachable history blobs with no high-confidence credential findings. CRLF-aware staged/unstaged `diff --check` passed. Plain `git diff --check` reports CRLF line endings (including existing generated metadata changes); no normalization or unrelated data edits were made. See [15_approval_aware_execution.md](./15_approval_aware_execution.md). No live PayPal requests, package additions, commit, push, or Day 16 work occurred.
 
+## Reliability and malformed telemetry Day 16–17
+
+Day 16's audit checkpoint, dashboard degradation, and operator-input remediation
+is committed at `d51edfa` on its own branch. Day 17 reproduced and addressed a
+malformed-SQLite-row failure in `_verify_rows`: a BLOB in a hashed text field
+could raise during decoding/hash reconstruction, escaping the dashboard's
+expected telemetry failure handling. The verifier now validates required
+SQLite storage types, hash and event metadata, and timestamp shape before hash
+reconstruction. Invalid rows return a bounded `INVALID_ROW` or `INVALID_EVENT`
+result; corrupted telemetry is withheld, not re-anchored or presented as
+verified zero activity. The authenticated overview, trace list, trace detail,
+and alerts routes retain a generic warning while independent approval state
+remains available.
+
+On 2026-11-10, branch `day18-release-readiness` was created at the unchanged
+Day 16 commit with the existing Day 17 worktree edits preserved. In that
+worktree, focused audit/dashboard/approval tests passed `88`; the full suite
+passed `399`; compileall passed; the offline attack suite passed `22/22` with
+zero PayPal calls; the secret scan covered 186 worktree files and 382 reachable
+history blobs with no high-confidence credential findings; and the
+CRLF-aware diff check passed. The changes are uncommitted. These results
+validate only the local offline prototype and do not close production
+identity, process isolation, provider, ML, backup, or deployment gates.
+
 ## Final-stretch verification and submission material
 
-The original Master Phase 0–29 roadmap, 14-item hackathon feature audit,
+The original Master Phase 0–29 roadmap, 15-item hackathon feature audit,
 fresh-clone findings, verified offline commands, current Gate C failure,
 latency sample, known Order A outcome, and remaining submission work are
 consolidated in [`ROADMAP_RECONCILIATION.md`](../ROADMAP_RECONCILIATION.md).

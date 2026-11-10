@@ -42,9 +42,9 @@ demonstration were not started as part of this final-stretch work.
 | 20 | Database design | **PARTIAL** — local SQLite stores and migrations/state handling exist; no production PostgreSQL design or deployed database. |
 | 21 | Evaluation | **PARTIAL** — offline synthetic evaluations exist, but Gate C fails and the full four-detector comparison is not implemented. |
 | 22 | Failure injection | **PARTIAL** — offline failure and attack tests exist; they do not prove provider-level behavior or production resilience. |
-| 23 | Security | **PARTIAL** — local security tests, a value-suppressing secret scanner, and documented boundaries exist; no independent security assessment or production security certification. |
+| 23 | Security | **PARTIAL** — local security tests, a value-suppressing secret scanner, fail-closed malformed telemetry verification, and documented boundaries exist; no independent security assessment or production security certification. |
 | 24 | MLOps | **NOT STARTED** — no model lifecycle, deployment, or drift-monitoring system. |
-| 25 | Testing | **PARTIAL** — 331 pytest tests pass after offline fixture generation; this is not production or external-provider integration coverage. |
+| 25 | Testing | **PARTIAL** — the current local Day 17 worktree passed 399 pytest tests after offline fixture generation; this is not production or external-provider integration coverage. |
 | 26 | Docker | **NOT STARTED**. |
 | 27 | Deployment | **NOT STARTED**. |
 | 28 | Optimization | **PARTIAL** — older local offline microbenchmarks are recorded, but the current benchmark script fails during approval setup because the persisted kill-switch row is unavailable. No current p50/p95 result is claimed, and there is no production/load optimization evidence. |
@@ -58,7 +58,7 @@ demonstration were not started as part of this final-stretch work.
 | B — Baselines | **PASS** | Rules and Isolation Forest run on the held-out synthetic split. |
 | C — Detector | **FAIL** | Current reproduced rules PR-AUC 0.463 / FPR 0%; Isolation Forest PR-AUC 0.706 / FPR 56.9%. Registered FPR ceiling is 10%. Rules remain the safer operational baseline. |
 | D — Runtime | **PARTIAL** | Local payment gateway can block, review, or allow a guarded fake/manual Sandbox operation. No general production runtime deployment. |
-| E — Reliability | **PARTIAL** | Offline tests cover local database, kill switch, audit, duplicate, uncertainty, and recovery cases. Provider/network guarantees remain outside local SQLite. |
+| E — Reliability | **PARTIAL** | Offline tests cover local database, malformed audit rows, kill switch, duplicate, uncertainty, and recovery cases. Provider/network guarantees remain outside local SQLite; backup/restore and production recovery evidence are missing. |
 | F — Demo | **PARTIAL** | Side-by-side poisoned-proposal demo and 22-case offline attack suite run. The complete original normal/loop/cost/exfiltration demo set is not shown as a single end-to-end user workflow. |
 
 ## Hackathon feature audit
@@ -84,6 +84,7 @@ readiness.
 | 12 | Latency p50/p95 | **PARTIAL** | Optional | Historical offline local measurements are documented, but a fresh run of the current script fails during approval setup; no current reproducible p50/p95 claim is made. |
 | 13 | Failure injection | **PARTIAL** | Demo-critical | Local injected DB, adapter uncertainty, concurrency, kill-switch, and recovery cases are covered; external provider failure semantics remain unverified. |
 | 14 | Order A documentation | **DONE (UNRESOLVED OUTCOME)** | Demo-critical | Reconciliation record reports later GET 404; the provider outcome remains unresolved and is not represented as a successful capture. |
+| 15 | Malformed telemetry degradation | **VERIFIED LOCALLY** | Demo-critical | Day 17 tests reject malformed SQLite storage values, withhold unverified dashboard telemetry on all affected pages, and preserve independent approval state; this does not establish production database resilience. |
 
 ## Hackathon Day evidence
 
@@ -105,6 +106,8 @@ The handoffs and repository history show this Hackathon Day progression:
 | 12 | `12_security_dashboard.md`; `0bdebd5` | Authenticated localhost dashboard and synthetic offline walkthrough. |
 | 13 | `13_failure_injection_reliability.md`; `c863820`, `0a58124` | Local failure/reliability tests and recorded microbenchmarks. Current benchmark script fails during approval setup, so its historical measurements are not newly reproduced. |
 | 14 | `14_crash_recovery_reconciliation.md`, `14_quickstart.md`; `60382aa` | Durable dispatch marker, conservative recovery, and `@guard` integration. Does not sandbox same-process Python or promise provider exactly-once execution. |
+| 16 | `PROGRESS.md`; `d51edfa` | Local audit-checkpoint and dashboard-resilience remediation; does not provide an independently administered remote trust anchor. |
+| 17 | `PROGRESS.md`; uncommitted on `day18-release-readiness` | Malformed SQLite telemetry validation and dashboard degradation tests; local evidence only, not a production security certification. |
 
 These are Hackathon Day labels only; they do not imply completion of similarly
 numbered Master Phases or entries in the 12-stage checklist. The complete
@@ -137,6 +140,17 @@ complete.
 
 ## Release evidence and limitations
 
+- On 2026-11-10, the Day 17 malformed-telemetry remediation was validated in an
+  uncommitted worktree based on `d51edfa` on branch
+  `day18-release-readiness`: focused audit/dashboard/approval tests **88
+  passed**; full pytest **399 passed** with one third-party deprecation
+  warning; compileall passed; the offline attack suite passed **22/22** with
+  zero PayPal calls; the secret scanner covered 186 worktree files and 382
+  reachable history blobs with no high-confidence credential findings; and
+  CRLF-aware `git diff --check` passed. Regression tests exercise malformed
+  SQLite storage classes and confirm all affected authenticated dashboard
+  routes withhold unverified telemetry while approval state stays available.
+  The code and documentation changes are not committed or pushed.
 - Fresh clone from public `origin/main` at `60382aa`, isolated Python 3.10.11
   environment, and install with `.[dev,agent,day10]` succeeded. The public
   checkout predates this local final-stretch documentation commit, so its
@@ -161,5 +175,9 @@ complete.
 - The repository is a local prototype. Day 7 Order A remains unresolved,
   Gate C fails, the detector advisor and telemetry publisher are optional, no
   hosted CI is configured, and the audit chain has no external anchor.
+- Production identity and agent-process isolation, a production payment
+  datastore, provider-level exactly-once behavior, production backup/restore
+  evidence, and production deployment configuration remain unimplemented or
+  unverified. Do not deploy the local SQLite prototype as a payment service.
 - Public submission still requires the entrant to create and publish a
   sub-three-minute video and complete any required Devpost form fields.

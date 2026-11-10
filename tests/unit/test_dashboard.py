@@ -503,6 +503,50 @@ def test_corrupt_telemetry_keeps_dashboard_and_approval_state_available(tmp_path
     assert store.get_approval(approval.approval_id).status == "PENDING"
 
 
+def test_malformed_sqlite_storage_degrades_all_telemetry_pages_without_hiding_approvals(tmp_path):
+    telemetry = tmp_path / "telemetry.sqlite"
+    append_trace(
+        telemetry,
+        "trace_malformed_blob",
+        "operation_malformed_blob",
+        (("POLICY_EVALUATED", "BLOCK", ("AUTHORIZATION_MISSING",)),),
+    )
+    app = make_app(tmp_path)
+    store = app.state.approval_store
+    approval = store.create_approval(
+        intent=make_intent("approval_with_malformed_telemetry"),
+        context=AuthenticatedScope(principal_id="dashboard_principal", scope_id="dashboard_scope"),
+    )
+    with sqlite3.connect(telemetry) as conn:
+        conn.execute(
+            "UPDATE payment_audit_chain SET event_timestamp=CAST('bad' AS BLOB) "
+            "WHERE sequence_number=1"
+        )
+    client = TestClient(app)
+    sign_in(client)
+
+    overview = client.get("/dashboard")
+    traces = client.get("/dashboard/traces")
+    trace_detail = client.get("/dashboard/traces/trace_malformed_blob")
+    alerts = client.get("/dashboard/alerts")
+    approvals = client.get("/dashboard/approvals")
+
+    telemetry_pages = (overview, traces, trace_detail, alerts)
+    assert all(response.status_code == 200 for response in telemetry_pages)
+    assert approvals.status_code == 200
+    assert all("Telemetry is unavailable" in response.text for response in telemetry_pages)
+    assert "PENDING: 1" in overview.text
+    assert approval.approval_id in approvals.text
+    assert store.get_approval(approval.approval_id).status == "PENDING"
+    assert "ALLOW: 0" not in overview.text
+    assert "BLOCK: 0" not in overview.text
+    assert "0 matching traces" not in traces.text
+    assert "No persisted traces matched" not in traces.text
+    assert "No alert events were found" not in alerts.text
+    assert "AUTHORIZATION_MISSING" not in overview.text + traces.text + trace_detail.text + alerts.text
+    assert "trace_malformed_blob" not in overview.text + traces.text + alerts.text
+
+
 def test_telemetry_database_without_expected_table_is_degraded(tmp_path):
     telemetry = tmp_path / "telemetry.sqlite"
     with sqlite3.connect(telemetry) as conn:
