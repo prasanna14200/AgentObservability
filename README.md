@@ -103,6 +103,13 @@ customer-support Isolation Forest result is PR-AUC 0.706 and FPR 56.9%; the
 rules baseline is PR-AUC 0.463 and FPR 0%. Gate C therefore fails the registered
 10% FPR ceiling.
 
+GitHub Actions runs the test suite, compile check, offline attack suite, and
+wheel build on Python 3.10 and 3.12. A separate security job scans the complete
+reachable Git history and audits the pinned container dependency lock. These
+jobs do not contact PayPal, provision infrastructure, or deploy the
+application. The workflow is a CI gate only; deployment remains a separately
+reviewed step.
+
 To start the localhost-only approval service and dashboard after installing
 the `day10` optional dependencies:
 
