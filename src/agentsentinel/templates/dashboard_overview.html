@@ -30,6 +30,7 @@
         </div>
         <span class="badge">Authenticated · {{ role }}</span>
       </div>
+      {% if telemetry_warning %}<p class="warning" role="status">{{ telemetry_warning }}</p>{% endif %}
       <section class="metric-grid" aria-label="Payment metrics">
         {% for key, label in [
           ('operations', 'Payment operations'),
@@ -70,7 +71,7 @@
           <div class="panel-heading"><h2>Audit integrity</h2><span class="badge {{ 'danger' if audit.status == 'INVALID' else '' }}">{{ audit.status }}</span></div>
           <p><strong>{{ audit.records_checked }}</strong> chained records verified</p>
           <p class="muted">First broken sequence: {{ audit.first_broken_sequence }} · {{ audit.mode }}</p>
-          <p class="muted">Verification timestamp: {{ audit.verified_at }} · external anchoring is not implemented.</p>
+          <p class="muted">Verification timestamp: {{ audit.verified_at }} · checked against a separate local checkpoint.</p>
           {% if role == 'approver' %}
             <form method="post" action="/dashboard/audit/verify" class="inline-form">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />

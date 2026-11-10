@@ -180,3 +180,113 @@ def test_approval_api_requires_matching_csrf_token(tmp_path):
 
     assert missing.status_code == mismatched.status_code == 403
     assert store.get_approval(record.approval_id).status == "PENDING"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "UNKNOWN_REASON",
+        "",
+        "X" * 65,
+        "BAD\nREASON",
+        "Bearer secret-token-value",
+        "REJECTED_€",
+    ],
+)
+def test_rejection_api_rejects_unsafe_reason_codes_without_reflection(tmp_path, reason):
+    secret = "c" * 40
+    app = create_app(db_path=tmp_path / "reason.sqlite", approver_secret=secret)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent(),
+        context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+    )
+    client = TestClient(app)
+    response = client.post(
+        f"/approvals/{record.approval_id}/reject",
+        json={"reason_code": reason},
+        headers={
+            "Authorization": "Bearer " + secret,
+            "X-CSRF-Token": "csrf",
+            "Cookie": "csrf_token=csrf",
+        },
+    )
+
+    assert response.status_code == 400
+    assert not reason or reason not in response.text
+    assert store.get_approval(record.approval_id).status == "PENDING"
+
+
+def test_rejection_api_accepts_a_known_reason_code(tmp_path):
+    secret = "d" * 40
+    app = create_app(db_path=tmp_path / "known_reason.sqlite", approver_secret=secret)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent(),
+        context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+    )
+    response = TestClient(app).post(
+        f"/approvals/{record.approval_id}/reject",
+        json={"reason_code": "REJECTION_POLICY_CONCERN"},
+        headers={
+            "Authorization": "Bearer " + secret,
+            "X-CSRF-Token": "csrf",
+            "Cookie": "csrf_token=csrf",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["decision_reason"] == "REJECTION_POLICY_CONCERN"
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_kill_switch_api_accepts_json_booleans(tmp_path, enabled):
+    secret = "e" * 40
+    app = create_app(db_path=tmp_path / "kill_bool.sqlite", approver_secret=secret)
+    response = TestClient(app).post(
+        "/killswitch",
+        json={"enabled": enabled},
+        headers={
+            "Authorization": "Bearer " + secret,
+            "X-CSRF-Token": "csrf",
+            "Cookie": "csrf_token=csrf",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is enabled
+
+
+@pytest.mark.parametrize("enabled", ["false", "true", 0, 1, None, ""])
+def test_kill_switch_api_rejects_non_boolean_values(tmp_path, enabled):
+    secret = "f" * 40
+    app = create_app(db_path=tmp_path / "invalid_kill_bool.sqlite", approver_secret=secret)
+    store = app.state.approval_store
+    response = TestClient(app).post(
+        "/killswitch",
+        json={"enabled": enabled},
+        headers={
+            "Authorization": "Bearer " + secret,
+            "X-CSRF-Token": "csrf",
+            "Cookie": "csrf_token=csrf",
+        },
+    )
+
+    assert response.status_code == 400
+    assert store.read_kill_switch().enabled is False
+
+
+def test_kill_switch_api_rejects_missing_enabled_field(tmp_path):
+    secret = "g" * 40
+    app = create_app(db_path=tmp_path / "missing_kill_bool.sqlite", approver_secret=secret)
+    response = TestClient(app).post(
+        "/killswitch",
+        json={},
+        headers={
+            "Authorization": "Bearer " + secret,
+            "X-CSRF-Token": "csrf",
+            "Cookie": "csrf_token=csrf",
+        },
+    )
+
+    assert response.status_code == 400

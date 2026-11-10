@@ -36,6 +36,12 @@ Approved, rejected, and expired states are terminal for the approval record unle
 
 When the kill switch is active, new payment actions must return `BLOCK` with reason code `KILL_SWITCH_ACTIVE`. Previously approved authorizations cannot bypass the switch, and the gateway fails closed if the kill-switch state cannot be read. Only authenticated approvers may enable or disable it, and each toggle is audited.
 
+## Operator reason-code schema
+
+Operator actions accept bounded reason codes rather than free-form explanations. Codes must be exact, uppercase ASCII identifiers from the service allowlist (at most 64 characters); empty values, unknown codes, control characters, Unicode, and arbitrary text are rejected without echoing the submitted value.
+
+Approval codes are `APPROVED`, `HUMAN_REJECTED`, `REJECTION_POLICY_CONCERN`, `REJECTION_INTENT_MISMATCH`, `REJECTION_UNEXPECTED_DETAILS`, `REJECTION_DUPLICATE`, and `REJECTION_OTHER`. Kill-switch codes are `KILL_SWITCH_ENABLED`, `KILL_SWITCH_DISABLED`, `KILL_SWITCH_SECURITY_INCIDENT`, and `KILL_SWITCH_MAINTENANCE`. The dashboard uses the fixed `HUMAN_REJECTED` and toggle codes; API callers may select a listed action-appropriate code. The kill-switch API accepts only a JSON boolean for `enabled`; strings, numbers, null, and a missing field are invalid.
+
 ## Known limitations
 
 - This implementation intentionally does not make live PayPal Sandbox requests.

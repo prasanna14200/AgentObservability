@@ -71,7 +71,7 @@ Open **Offline demo** from the navigation. It is labeled `OFFLINE DEMO`, uses se
 - Approval actions require the existing trusted approver credential, an approver-role session, CSRF token, explicit confirmation, exact request fingerprint, current pending state, unexpired request, and a fresh kill-switch read. The existing atomic approval store issues the application authorization; the payment gateway still enforces policy, budgets, and authorization consumption.
 - Rejection also requires exact fingerprint, current state, expiry, and a readable kill-switch control record. A rejection remains allowed while the switch is enabled because rejection does not authorize payment; a failed state read blocks the action.
 - Kill-switch transitions use the existing persisted control and audit event path. A read or write failure returns an error and does not present a success response.
-- Audit verification is read-only and tamper-evident, not tamper-proof. External anchoring, recovery from a privileged local administrator, and detection of a valid-tail truncation are not implemented.
+- Audit verification uses a separate local checkpoint and a consistent read snapshot, so database-only valid-tail truncation, rollback, and post-anchor record changes are detected. This is tamper-evident, not tamper-proof: an attacker able to modify both the database and checkpoint can defeat it. Non-empty databases without a checkpoint fail closed unless an operator explicitly initializes a legacy checkpoint after verifying provenance.
 - The default module launch binds to `127.0.0.1:8000`. Do not expose it through a public interface, reverse proxy, or tunnel during Day 12.
 
 ## Launch commands (PowerShell)

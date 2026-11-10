@@ -10,6 +10,7 @@
     <header class="topbar"><a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a><nav><a href="/dashboard">Overview</a><a href="/dashboard/traces">Payment traces</a><a href="/dashboard/alerts">Security alerts</a><a href="/dashboard/approvals">Approvals</a><a href="/dashboard/demo">Offline demo</a></nav><span class="badge">{{ role }}</span></header>
     <main class="page">
       <p class="eyebrow">PERSISTED TELEMETRY · READ ONLY</p><h1>Payment trace explorer</h1>
+      {% if telemetry_warning %}<p class="warning" role="status">{{ telemetry_warning }}</p>{% endif %}
       <form class="search-form" method="get" action="/dashboard/traces">
         <label>Trace or operation ID <input name="q" value="{{ q }}" maxlength="128" /></label>
         <label>Time range <select name="days">{% for option in [1, 7, 30] %}<option value="{{ option }}" {{ 'selected' if days == option else '' }}>{{ option }} days</option>{% endfor %}</select></label>

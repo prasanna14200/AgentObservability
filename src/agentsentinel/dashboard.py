@@ -26,6 +26,7 @@ from agentsentinel.detectors.payment import PaymentDetectorAdapter
 from agentsentinel.observability.payment_audit import (
     PaymentAuditChain,
     PaymentAuditUnavailable,
+    PaymentAuditVerification,
 )
 from agentsentinel.observability.payment_events import build_payment_event
 from agentsentinel.schema.payment_telemetry import PaymentTelemetryEvent
@@ -101,6 +102,15 @@ def _read_only(path: Path):
             conn.close()
 
 
+@contextmanager
+def _read_telemetry(path: Path, connection: sqlite3.Connection | None = None):
+    if connection is not None:
+        yield connection
+    else:
+        with _read_only(path) as conn:
+            yield conn
+
+
 def _has_table(conn: sqlite3.Connection, name: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -172,8 +182,10 @@ def _metric(value: Any, source: str, time_range: str) -> dict[str, str]:
     }
 
 
-def _read_decision_counts(path: Path, since: str) -> dict[str, int] | None:
-    with _read_only(path) as conn:
+def _read_decision_counts(
+    path: Path, since: str, *, connection: sqlite3.Connection | None = None
+) -> dict[str, int] | None:
+    with _read_telemetry(path, connection) as conn:
         if conn is None or not _has_table(conn, "payment_audit_chain"):
             return None
         rows = conn.execute(
@@ -194,8 +206,10 @@ def _read_decision_counts(path: Path, since: str) -> dict[str, int] | None:
     return {str(row["decision"]): int(row["count"]) for row in rows if row["decision"] is not None}
 
 
-def _read_outcome_counts(path: Path, since: str) -> dict[str, int] | None:
-    with _read_only(path) as conn:
+def _read_outcome_counts(
+    path: Path, since: str, *, connection: sqlite3.Connection | None = None
+) -> dict[str, int] | None:
+    with _read_telemetry(path, connection) as conn:
         if conn is None or not _has_table(conn, "payment_audit_chain"):
             return None
         rows = conn.execute(
@@ -290,8 +304,10 @@ def _read_recent_failures(path: Path, since: datetime) -> int | None:
     return count
 
 
-def _read_trace_events(path: Path, trace_id: str) -> tuple[list[dict[str, Any]], bool]:
-    with _read_only(path) as conn:
+def _read_trace_events(
+    path: Path, trace_id: str, *, connection: sqlite3.Connection | None = None
+) -> tuple[list[dict[str, Any]], bool]:
+    with _read_telemetry(path, connection) as conn:
         if conn is None or not _has_table(conn, "payment_audit_chain"):
             return [], False
         rows = conn.execute(
@@ -427,8 +443,9 @@ def _read_trace_page(
     days: int,
     page: int,
     page_size: int,
+    connection: sqlite3.Connection | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
-    with _read_only(path) as conn:
+    with _read_telemetry(path, connection) as conn:
         if conn is None or not _has_table(conn, "payment_audit_chain"):
             return [], 0
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
@@ -464,15 +481,17 @@ def _read_trace_page(
     summaries = []
     for row in rows:
         trace_id = row["trace_id"]
-        events, truncated = _read_trace_events(path, trace_id)
+        events, truncated = _read_trace_events(path, trace_id, connection=conn)
         summary = _trace_summary(trace_id, events)
         summary["truncated"] = truncated
         summaries.append(summary)
     return summaries, total
 
 
-def _read_alerts(path: Path, since: str) -> list[dict[str, str]]:
-    with _read_only(path) as conn:
+def _read_alerts(
+    path: Path, since: str, *, connection: sqlite3.Connection | None = None
+) -> list[dict[str, str]]:
+    with _read_telemetry(path, connection) as conn:
         if conn is None or not _has_table(conn, "payment_audit_chain"):
             return []
         rows = conn.execute(
@@ -579,8 +598,12 @@ def _audit_summary(path: Path) -> dict[str, Any]:
         return {"status": "No data", "records_checked": "No data", "first_broken_sequence": "No data", "verified_at": "No data", "mode": "No chain file"}
     try:
         result = PaymentAuditChain.open_readonly(path).verify()
-    except (PaymentAuditUnavailable, OSError):
+    except (PaymentAuditUnavailable, sqlite3.Error, OSError):
         return {"status": "Unavailable", "records_checked": "No data", "first_broken_sequence": "No data", "verified_at": "No data", "mode": "Live verification failed"}
+    return _audit_result_summary(result)
+
+
+def _audit_result_summary(result: PaymentAuditVerification) -> dict[str, Any]:
     if result.records_checked == 0 and result.valid:
         state = "No data"
     else:
@@ -595,6 +618,16 @@ def _audit_summary(path: Path) -> dict[str, Any]:
     }
 
 
+def _telemetry_warning(audit: dict[str, Any]) -> str | None:
+    if audit["status"] == "Unavailable":
+        return "Telemetry is unavailable. Counts and alerts are withheld; payment and approval state remain available."
+    if audit["status"] == "INVALID":
+        return "Telemetry integrity verification failed. Counts and alerts are withheld; payment and approval state remain available."
+    if audit["status"] == "No data":
+        return "No telemetry database is available. Payment and approval state are shown independently."
+    return None
+
+
 def _overview_context(
     *,
     payment_db_path: Path,
@@ -602,7 +635,6 @@ def _overview_context(
     failures_path: Path,
     store: Any,
     role: str,
-    audit_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     since = (now - timedelta(hours=24)).isoformat()
@@ -610,11 +642,44 @@ def _overview_context(
     metrics: dict[str, dict[str, str]] = {}
     operation_count = _read_operation_count(payment_db_path)
     metrics["operations"] = _metric(operation_count, "operations table", "All persisted operations")
-    decisions = _read_decision_counts(telemetry_db_path, since)
+    audit: dict[str, Any] = {
+        "status": "No data",
+        "records_checked": "No data",
+        "first_broken_sequence": "No data",
+        "verified_at": "No data",
+        "mode": "No chain file",
+    }
+    telemetry_warning = _telemetry_warning(audit)
+    decisions: dict[str, int] | None = None
+    outcomes: dict[str, int] | None = None
+    alerts: list[dict[str, str]] = []
+    if telemetry_db_path.is_file():
+        try:
+            with PaymentAuditChain.open_readonly(telemetry_db_path).verified_snapshot() as (
+                connection,
+                verification,
+            ):
+                audit = _audit_result_summary(verification)
+                telemetry_warning = _telemetry_warning(audit)
+                if telemetry_warning is None:
+                    decisions = _read_decision_counts(telemetry_db_path, since, connection=connection)
+                    outcomes = _read_outcome_counts(telemetry_db_path, since, connection=connection)
+                    alerts = _read_alerts(telemetry_db_path, since, connection=connection)
+        except (sqlite3.Error, OSError, PaymentAuditUnavailable):
+            audit = {
+                "status": "Unavailable",
+                "records_checked": "No data",
+                "first_broken_sequence": "No data",
+                "verified_at": "No data",
+                "mode": "Telemetry read failed",
+            }
+            telemetry_warning = _telemetry_warning(audit)
+            decisions = None
+            outcomes = None
+            alerts = []
     for decision in ("ALLOW", "BLOCK", "REVIEW"):
         value = None if decisions is None else decisions.get(decision, 0)
         metrics[f"decision_{decision.lower()}"] = _metric(value, "payment_audit_chain / POLICY_EVALUATED", time_range)
-    outcomes = _read_outcome_counts(telemetry_db_path, since)
     for event_type, key in (
         ("PAYMENT_COMPLETED", "completed"),
         ("PAYMENT_FAILED", "failed"),
@@ -642,7 +707,6 @@ def _overview_context(
         "rejected/payment_telemetry.jsonl",
         time_range,
     )
-    audit = audit_override or _audit_summary(telemetry_db_path)
     metrics["audit_status"] = _metric(audit["status"], "payment_audit_chain", "Live verification at page render")
     metrics["audit_records"] = _metric(audit["records_checked"], "payment_audit_chain", "All chained records checked")
     return {
@@ -651,7 +715,8 @@ def _overview_context(
         "decision_counts": decisions,
         "approval_counts": approval_counts,
         "audit": audit,
-        "alerts": _read_alerts(telemetry_db_path, since),
+        "alerts": alerts,
+        "telemetry_warning": telemetry_warning,
         "time_range": time_range,
     }
 
@@ -757,13 +822,38 @@ def create_dashboard_router(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="search too long")
         if page < 1 or page_size < 1 or page_size > _MAX_PAGE_SIZE or days not in {1, 7, 30}:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid pagination or time range")
-        traces, total = _read_trace_page(
-            telemetry_db_path,
-            search=q,
-            days=days,
-            page=page,
-            page_size=page_size,
-        )
+        audit: dict[str, Any] = {
+            "status": "No data",
+            "records_checked": "No data",
+            "first_broken_sequence": "No data",
+            "verified_at": "No data",
+            "mode": "No chain file",
+        }
+        telemetry_warning = _telemetry_warning(audit)
+        try:
+            if not telemetry_db_path.is_file():
+                traces, total = [], 0
+            else:
+                with PaymentAuditChain.open_readonly(telemetry_db_path).verified_snapshot() as (
+                    connection,
+                    verification,
+                ):
+                    audit = _audit_result_summary(verification)
+                    telemetry_warning = _telemetry_warning(audit)
+                    if telemetry_warning is not None:
+                        traces, total = [], 0
+                    else:
+                        traces, total = _read_trace_page(
+                            telemetry_db_path,
+                            search=q,
+                            days=days,
+                            page=page,
+                            page_size=page_size,
+                            connection=connection,
+                        )
+        except (sqlite3.Error, OSError, PaymentAuditUnavailable):
+            traces, total = [], 0
+            telemetry_warning = _telemetry_warning({**audit, "status": "Unavailable"})
         return _render(
             request,
             "dashboard_traces.html",
@@ -776,6 +866,7 @@ def create_dashboard_router(
                 "days": days,
                 "total": total,
                 "pages": max(1, (total + page_size - 1) // page_size),
+                "telemetry_warning": telemetry_warning,
             },
         )
 
@@ -784,26 +875,99 @@ def create_dashboard_router(
         role = authenticated_role(request)
         if not _TRACE_ID.fullmatch(trace_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="trace not found")
-        events, truncated = _read_trace_events(telemetry_db_path, trace_id)
+        audit: dict[str, Any] = {
+            "status": "No data",
+            "records_checked": "No data",
+            "first_broken_sequence": "No data",
+            "verified_at": "No data",
+            "mode": "No chain file",
+        }
+        telemetry_warning = _telemetry_warning(audit)
+        try:
+            if not telemetry_db_path.is_file():
+                events, truncated = [], False
+            else:
+                with PaymentAuditChain.open_readonly(telemetry_db_path).verified_snapshot() as (
+                    connection,
+                    verification,
+                ):
+                    audit = _audit_result_summary(verification)
+                    telemetry_warning = _telemetry_warning(audit)
+                    events, truncated = (
+                        ([], False)
+                        if telemetry_warning is not None
+                        else _read_trace_events(telemetry_db_path, trace_id, connection=connection)
+                    )
+        except (sqlite3.Error, OSError, PaymentAuditUnavailable):
+            events, truncated = [], False
+            telemetry_warning = _telemetry_warning({**audit, "status": "Unavailable"})
         if not events:
+            if telemetry_warning is not None:
+                return _render(
+                    request,
+                    "dashboard_trace_detail.html",
+                    {
+                        "role": role,
+                        "trace": _trace_summary(trace_id, []),
+                        "events": [],
+                        "truncated": False,
+                        "telemetry_warning": telemetry_warning,
+                    },
+                )
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="trace not found")
         trace = _trace_summary(trace_id, events)
         trace.update(_read_operation_lifecycle(payment_db_path, trace["operation_id"]))
         return _render(
             request,
             "dashboard_trace_detail.html",
-            {"role": role, "trace": trace, "events": events, "truncated": truncated},
+            {
+                "role": role,
+                "trace": trace,
+                "events": events,
+                "truncated": truncated,
+                "telemetry_warning": telemetry_warning,
+            },
         )
 
     @router.get("/dashboard/alerts", response_class=HTMLResponse)
     async def dashboard_alerts(request: Request) -> HTMLResponse:
         role = authenticated_role(request)
         since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        alerts = _read_alerts(telemetry_db_path, since)
+        audit: dict[str, Any] = {
+            "status": "No data",
+            "records_checked": "No data",
+            "first_broken_sequence": "No data",
+            "verified_at": "No data",
+            "mode": "No chain file",
+        }
+        telemetry_warning = _telemetry_warning(audit)
+        try:
+            if not telemetry_db_path.is_file():
+                alerts = []
+            else:
+                with PaymentAuditChain.open_readonly(telemetry_db_path).verified_snapshot() as (
+                    connection,
+                    verification,
+                ):
+                    audit = _audit_result_summary(verification)
+                    telemetry_warning = _telemetry_warning(audit)
+                    alerts = (
+                        []
+                        if telemetry_warning is not None
+                        else _read_alerts(telemetry_db_path, since, connection=connection)
+                    )
+        except (sqlite3.Error, OSError, PaymentAuditUnavailable):
+            alerts = []
+            telemetry_warning = _telemetry_warning({**audit, "status": "Unavailable"})
         return _render(
             request,
             "dashboard_alerts.html",
-            {"role": role, "alerts": alerts, "time_range": f"Last 24 hours (since {since})"},
+            {
+                "role": role,
+                "alerts": alerts,
+                "time_range": f"Last 24 hours (since {since})",
+                "telemetry_warning": telemetry_warning,
+            },
         )
 
     @router.get("/dashboard/approvals", response_class=HTMLResponse)
@@ -880,14 +1044,12 @@ def create_dashboard_router(
         _require_form_csrf(request, form)
         if form.get("confirm") != "yes":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="explicit confirmation required")
-        audit = _audit_summary(telemetry_db_path)
         context = _overview_context(
             payment_db_path=payment_db_path,
             telemetry_db_path=telemetry_db_path,
             failures_path=failures_path,
             store=store,
             role=role,
-            audit_override=audit,
         )
         return _render(request, "dashboard_overview.html", context)
 

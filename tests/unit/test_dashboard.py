@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -389,6 +390,42 @@ def test_malformed_telemetry_is_excluded_from_dashboard_queries(tmp_path):
     assert "malformed and private payload" not in traces.text
 
 
+def test_dashboard_metrics_share_the_verified_telemetry_snapshot(tmp_path, monkeypatch):
+    import agentsentinel.dashboard as dashboard_module
+
+    telemetry = tmp_path / "telemetry.sqlite"
+    append_trace(
+        telemetry,
+        "trace_snapshot",
+        "operation_snapshot",
+        (("POLICY_EVALUATED", "ALLOW", ()),),
+    )
+    client = TestClient(make_app(tmp_path))
+    sign_in(client)
+    original_reader = dashboard_module._read_decision_counts
+
+    def tamper_after_verification(path, since, *, connection=None):
+        with sqlite3.connect(telemetry) as writer:
+            row = writer.execute(
+                "SELECT canonical_event FROM payment_audit_chain WHERE sequence_number=1"
+            ).fetchone()
+            payload = json.loads(row[0])
+            payload["gateway_decision"] = "BLOCK"
+            writer.execute(
+                "UPDATE payment_audit_chain SET canonical_event=? WHERE sequence_number=1",
+                (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True),),
+            )
+        return original_reader(path, since, connection=connection)
+
+    monkeypatch.setattr(dashboard_module, "_read_decision_counts", tamper_after_verification)
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "VALID" in response.text
+    assert "ALLOW: 1" in response.text
+    assert "BLOCK:" not in response.text
+
+
 def test_demo_is_separate_and_does_not_issue_authorizations_or_call_paypal(tmp_path, monkeypatch):
     from agentsentinel.payment_gateway import PaymentGateway
 
@@ -425,11 +462,83 @@ def test_read_only_audit_verification_does_not_initialize_missing_database(tmp_p
     client = TestClient(make_app(tmp_path))
     sign_in(client)
 
+    responses = [
+        client.get("/dashboard"),
+        client.get("/dashboard/traces"),
+        client.get("/dashboard/traces/trace_missing"),
+        client.get("/dashboard/alerts"),
+    ]
+
+    assert all(response.status_code == 200 for response in responses)
+    assert not missing.exists()
+    assert "No chain file" in responses[0].text
+    assert all("No telemetry database is available" in response.text for response in responses)
+
+
+def test_corrupt_telemetry_keeps_dashboard_and_approval_state_available(tmp_path):
+    telemetry = tmp_path / "telemetry.sqlite"
+    PaymentAuditChain(telemetry)
+    app = make_app(tmp_path)
+    store = app.state.approval_store
+    approval = store.create_approval(
+        intent=make_intent("approval_with_corrupt_telemetry"),
+        context=AuthenticatedScope(principal_id="dashboard_principal", scope_id="dashboard_scope"),
+    )
+    telemetry.write_bytes(b"not a sqlite database")
+    client = TestClient(app)
+    sign_in(client)
+
+    telemetry_pages = [
+        client.get("/dashboard"),
+        client.get("/dashboard/traces"),
+        client.get("/dashboard/traces/trace_missing"),
+        client.get("/dashboard/alerts"),
+    ]
+    approvals = client.get("/dashboard/approvals")
+
+    assert all(response.status_code == 200 for response in telemetry_pages)
+    assert approvals.status_code == 200
+    assert all("Telemetry is unavailable" in response.text for response in telemetry_pages)
+    assert approval.approval_id in approvals.text
+    assert store.get_approval(approval.approval_id).status == "PENDING"
+
+
+def test_telemetry_database_without_expected_table_is_degraded(tmp_path):
+    telemetry = tmp_path / "telemetry.sqlite"
+    with sqlite3.connect(telemetry) as conn:
+        conn.execute("CREATE TABLE unrelated (value TEXT)")
+    client = TestClient(make_app(tmp_path))
+    sign_in(client)
+
     response = client.get("/dashboard")
 
     assert response.status_code == 200
-    assert not missing.exists()
-    assert "No chain file" in response.text
+    assert "Telemetry is unavailable" in response.text
+    assert "Unavailable" in response.text
+
+
+def test_locked_telemetry_read_is_degraded_without_zero_counts(tmp_path, monkeypatch):
+    import agentsentinel.dashboard as dashboard_module
+
+    telemetry = tmp_path / "telemetry.sqlite"
+    append_trace(
+        telemetry,
+        "trace_locked",
+        "operation_locked",
+        (("POLICY_EVALUATED", "ALLOW", ()),),
+    )
+    client = TestClient(make_app(tmp_path))
+    sign_in(client)
+
+    def locked_read(_path, _since, *, connection=None):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(dashboard_module, "_read_decision_counts", locked_read)
+    response = client.get("/dashboard")
+
+    assert response.status_code == 200
+    assert "Telemetry is unavailable" in response.text
+    assert "Persisted operational data only" in response.text
 
 
 def test_dashboard_stylesheet_is_static_and_safe(tmp_path):
@@ -501,3 +610,33 @@ def test_dashboard_login_rejects_invalid_credentials_without_reflection(tmp_path
     assert rejected.status_code == 401
     assert credential not in rejected.text
     assert client.get("/dashboard").status_code == 401
+
+
+def test_dashboard_operator_actions_persist_only_schema_reason_codes(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    csrf = sign_in(client)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent("dashboard_reason"),
+        context=AuthenticatedScope(principal_id="dashboard_principal", scope_id="dashboard_scope"),
+    )
+
+    rejected = client.post(
+        f"/dashboard/approvals/{record.approval_id}/reject",
+        data={
+            "csrf_token": csrf,
+            "confirm": "yes",
+            "request_fingerprint": record.request_fingerprint,
+        },
+        follow_redirects=False,
+    )
+    switched = client.post(
+        "/dashboard/killswitch",
+        data={"csrf_token": csrf, "confirm": "yes", "enabled": "true"},
+        follow_redirects=False,
+    )
+
+    assert rejected.status_code == switched.status_code == 303
+    assert store.get_approval(record.approval_id).decision_reason == "HUMAN_REJECTED"
+    assert store.read_kill_switch().reason_code == "KILL_SWITCH_ENABLED"

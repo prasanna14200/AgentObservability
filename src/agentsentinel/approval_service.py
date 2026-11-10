@@ -30,6 +30,42 @@ from agentsentinel.schema.payment_telemetry import PaymentEventType
 ApprovalState = Literal["PENDING", "APPROVED", "REJECTED", "EXPIRED"]
 ApprovalReason = str
 
+# Operator reasons are exact codes, never free-form text. Approval codes:
+# APPROVED, HUMAN_REJECTED, REJECTION_POLICY_CONCERN,
+# REJECTION_INTENT_MISMATCH, REJECTION_UNEXPECTED_DETAILS,
+# REJECTION_DUPLICATE, REJECTION_OTHER. Kill-switch codes:
+# KILL_SWITCH_ENABLED, KILL_SWITCH_DISABLED, KILL_SWITCH_SECURITY_INCIDENT,
+# KILL_SWITCH_MAINTENANCE. Codes are bounded to 64 uppercase ASCII characters
+# and are validated against the action-specific allowlist before persistence.
+APPROVAL_REASON_CODES = frozenset({
+    "APPROVED",
+    "HUMAN_REJECTED",
+    "REJECTION_POLICY_CONCERN",
+    "REJECTION_INTENT_MISMATCH",
+    "REJECTION_UNEXPECTED_DETAILS",
+    "REJECTION_DUPLICATE",
+    "REJECTION_OTHER",
+})
+KILL_SWITCH_REASON_CODES = frozenset({
+    "KILL_SWITCH_ENABLED",
+    "KILL_SWITCH_DISABLED",
+    "KILL_SWITCH_SECURITY_INCIDENT",
+    "KILL_SWITCH_MAINTENANCE",
+})
+
+
+def _validate_reason_code(value: object, allowed: frozenset[str]) -> str:
+    if type(value) is not str or len(value) > 64 or value not in allowed:
+        raise ValueError("invalid reason code")
+    return value
+
+
+def _http_reason_code(value: object, allowed: frozenset[str]) -> str:
+    try:
+        return _validate_reason_code(value, allowed)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid reason code") from None
+
 
 class ApprovalRecord(PaymentModel):
     approval_id: str
@@ -505,6 +541,7 @@ class ApprovalStore:
         return expired
 
     def reject_approval(self, approval_id: str, *, actor_role: str = "approver", reason_code: str = "HUMAN_REJECTED") -> ApprovalRecord:
+        reason_code = _validate_reason_code(reason_code, APPROVAL_REASON_CODES - {"APPROVED"})
         with self._write() as conn:
             row = conn.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
             if row is None:
@@ -543,6 +580,7 @@ class ApprovalStore:
         request_fingerprint: str | None = None,
         reason_code: str = "APPROVED",
     ) -> ApprovalRecord:
+        reason_code = _validate_reason_code(reason_code, frozenset({"APPROVED"}))
         now = self._now()
         expired = self.expire_pending_approvals(now=now)
         if any(record.approval_id == approval_id for record in expired):
@@ -685,8 +723,13 @@ class ApprovalStore:
         return self.read_kill_switch().enabled
 
     def set_kill_switch(self, *, enabled: bool, actor_role: str = "approver", reason_code: str | None = None) -> KillSwitchState:
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
         now = self._now()
-        reason = reason_code or ("KILL_SWITCH_ENABLED" if enabled else "KILL_SWITCH_DISABLED")
+        reason = _validate_reason_code(
+            reason_code if reason_code is not None else ("KILL_SWITCH_ENABLED" if enabled else "KILL_SWITCH_DISABLED"),
+            KILL_SWITCH_REASON_CODES,
+        )
         with self._write() as conn:
             conn.execute(
                 "INSERT INTO kill_switch(key,enabled,updated_at,reason_code) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at, reason_code=excluded.reason_code",
@@ -835,8 +878,13 @@ def create_app(
         _require_bearer(request, approver_secret)
         _require_csrf(request)
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        reason = payload.get("reason_code", "HUMAN_REJECTED")
-        record = store.reject_approval(approval_id, actor_role="approver", reason_code=str(reason))
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid request")
+        reason = _http_reason_code(
+            payload.get("reason_code", "HUMAN_REJECTED"),
+            APPROVAL_REASON_CODES - {"APPROVED"},
+        )
+        record = store.reject_approval(approval_id, actor_role="approver", reason_code=reason)
         return record.model_dump(mode="json")
 
     @app.get("/killswitch")
@@ -850,9 +898,12 @@ def create_app(
         _require_bearer(request, approver_secret)
         _require_csrf(request)
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        enabled = bool(payload.get("enabled", False))
-        reason = payload.get("reason_code", "KILL_SWITCH_ENABLED" if enabled else "KILL_SWITCH_DISABLED")
-        state = store.set_kill_switch(enabled=enabled, actor_role="approver", reason_code=str(reason))
+        if not isinstance(payload, dict) or type(payload.get("enabled")) is not bool:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="enabled must be a boolean")
+        enabled = payload["enabled"]
+        default_reason = "KILL_SWITCH_ENABLED" if enabled else "KILL_SWITCH_DISABLED"
+        reason = _http_reason_code(payload.get("reason_code", default_reason), KILL_SWITCH_REASON_CODES)
+        state = store.set_kill_switch(enabled=enabled, actor_role="approver", reason_code=reason)
         return {"enabled": state.enabled, "updated_at": state.updated_at.isoformat(), "reason_code": state.reason_code}
 
     @app.get("/audit")

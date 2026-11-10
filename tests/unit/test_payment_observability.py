@@ -15,7 +15,7 @@ from agentsentinel.detectors.payment import (
     PaymentDetectorAdvisoryProvider,
 )
 from agentsentinel.observability.collector import TraceCollector
-from agentsentinel.observability.payment_audit import PaymentAuditChain
+from agentsentinel.observability.payment_audit import PaymentAuditChain, PaymentAuditUnavailable
 from agentsentinel.observability.payment_events import PaymentTelemetryPublisher, build_payment_event
 from agentsentinel.payment_gateway import AdapterOutcome, PaymentGateway, TestOnlyAdapter
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy
@@ -241,6 +241,123 @@ def test_audit_chain_success_edit_and_reordering_detection(tmp_path):
     reordered = chain.verify()
     assert not reordered.valid
     assert reordered.first_broken_sequence == 1
+
+
+@pytest.mark.parametrize("records_to_delete", [1, 2])
+def test_audit_checkpoint_detects_deleted_tail_records(tmp_path, records_to_delete):
+    db = tmp_path / "audit.sqlite"
+    chain = PaymentAuditChain(db)
+    for index in range(3):
+        chain.append(make_event(f"evt_tail_{index:03d}"))
+
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "DELETE FROM payment_audit_chain WHERE sequence_number > ?",
+            (3 - records_to_delete,),
+        )
+
+    result = chain.verify()
+    assert not result.valid
+    assert result.reason_code == "CHECKPOINT_MISMATCH"
+
+
+def test_audit_checkpoint_detects_tampering_and_rollback(tmp_path):
+    db = tmp_path / "audit.sqlite"
+    chain = PaymentAuditChain(db)
+    chain.append(make_event("evt_checkpoint_001"))
+    snapshot = tmp_path / "older.sqlite"
+    with sqlite3.connect(db) as source, sqlite3.connect(snapshot) as backup:
+        source.backup(backup)
+
+    chain.append(make_event("evt_checkpoint_002", "POLICY_EVALUATED"))
+    with sqlite3.connect(db) as restored, sqlite3.connect(snapshot) as backup:
+        backup.backup(restored)
+
+    result = chain.verify()
+    assert not result.valid
+    assert result.reason_code == "CHECKPOINT_MISMATCH"
+
+
+def test_audit_checkpoint_modification_fails_verification(tmp_path):
+    chain = PaymentAuditChain(tmp_path / "audit.sqlite")
+    chain.append(make_event("evt_modified_checkpoint"))
+    state = json.loads(chain.anchor_path.read_text(encoding="utf-8"))
+    state["record_hash"] = "0" * 64
+    chain.anchor_path.write_text(json.dumps(state), encoding="utf-8")
+
+    result = chain.verify()
+    assert not result.valid
+    assert result.reason_code == "CHECKPOINT_MISMATCH"
+
+
+def test_missing_checkpoint_does_not_silently_reanchor_existing_chain(tmp_path):
+    db = tmp_path / "missing_anchor.sqlite"
+    chain = PaymentAuditChain(db)
+    chain.append(make_event("evt_missing_anchor"))
+    chain.anchor_path.unlink()
+
+    with pytest.raises(PaymentAuditUnavailable, match="checkpoint missing"):
+        PaymentAuditChain(db)
+    assert not chain.anchor_path.exists()
+    with pytest.raises(PaymentAuditUnavailable):
+        PaymentAuditChain.open_readonly(db)
+
+
+def test_missing_checkpoint_does_not_reanchor_after_all_rows_are_deleted(tmp_path):
+    db = tmp_path / "empty_missing_anchor.sqlite"
+    chain = PaymentAuditChain(db)
+    chain.append(make_event("evt_deleted_with_anchor"))
+    chain.anchor_path.unlink()
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM payment_audit_chain")
+        conn.execute("DELETE FROM payment_events")
+
+    with pytest.raises(PaymentAuditUnavailable, match="checkpoint missing"):
+        PaymentAuditChain(db)
+    assert not chain.anchor_path.exists()
+
+
+def test_legacy_chain_checkpoint_migration_is_explicit(tmp_path):
+    db = tmp_path / "legacy_anchor.sqlite"
+    chain = PaymentAuditChain(db)
+    chain.append(make_event("evt_legacy_anchor"))
+    chain.anchor_path.unlink()
+
+    PaymentAuditChain.initialize_legacy_checkpoint(db)
+
+    assert PaymentAuditChain.open_readonly(db).verify().valid
+
+
+def test_empty_audit_chain_is_initialized_and_verified(tmp_path):
+    chain = PaymentAuditChain(tmp_path / "empty.sqlite")
+
+    assert chain.anchor_path.is_file()
+    assert chain.verify().valid
+    assert chain.verify().records_checked == 0
+
+
+def test_interrupted_audit_checkpoint_update_is_recovered(tmp_path, monkeypatch):
+    db = tmp_path / "audit.sqlite"
+    chain = PaymentAuditChain(db)
+    original_write_anchor = chain._write_anchor
+    writes = 0
+
+    def fail_final_checkpoint(state):
+        nonlocal writes
+        writes += 1
+        if writes == 2:
+            raise RuntimeError("simulated checkpoint interruption")
+        original_write_anchor(state)
+
+    monkeypatch.setattr(chain, "_write_anchor", fail_final_checkpoint)
+    with pytest.raises(PaymentAuditUnavailable):
+        chain.append(make_event("evt_interrupted_checkpoint"))
+
+    with pytest.raises(PaymentAuditUnavailable):
+        chain.verify()
+    recovered = PaymentAuditChain(db)
+    assert recovered.verify().valid
+    assert recovered.record_count() == 1
 
 
 def test_concurrent_audit_append_has_unique_ordered_chain(tmp_path):
