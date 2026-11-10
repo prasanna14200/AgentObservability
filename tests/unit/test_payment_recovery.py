@@ -345,6 +345,22 @@ def test_reconciliation_rejects_mismatched_operation_attempt_or_key(tmp_path, mi
     assert row_state(db) == ("CLAIMED", "MAY_HAVE_DISPATCHED")
 
 
+def test_current_dispatch_marker_survives_store_restart(tmp_path):
+    db = tmp_path / "existing_dispatch_marker.sqlite"
+    request = make_intent("operation_existing_marker")
+    seed_authorization(db, request)
+    repository = payment_store(db)
+    reserve_and_claim(repository, request, mark_dispatched=False)
+
+    payment_store(db)
+
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT state,dispatch_state FROM operations WHERE operation_id=?",
+            (request.operation_id,),
+        ).fetchone() == ("CLAIMED", "NOT_DISPATCHED")
+
+
 def test_repeated_reconciliation_does_not_duplicate_transition_events(tmp_path):
     db = tmp_path / "recovery.sqlite"
     request = make_intent()

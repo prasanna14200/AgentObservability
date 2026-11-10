@@ -28,6 +28,7 @@ GatewayReason = Literal[
     "AUTHORIZATION_CONSUMPTION_FAILED", "EXECUTION_DISABLED", "PROVIDER_OUTCOME_UNCERTAIN",
     "OPERATION_FINALIZATION_FAILED", "RECONCILIATION_REQUIRED", "VERIFIED_COMPLETED", "VERIFIED_NO_PAYMENT",
     "KILL_SWITCH_ACTIVE", "RECOVERY_NOT_DISPATCHED", "DISPATCH_INTENT_FAILED",
+    "PROVIDER_CONFIRMED_FAILURE",
 ]
 
 
@@ -52,10 +53,16 @@ class GatewayResult(PaymentModel):
         return None if value is None else _check_id(value, "provider identifier")
 
 
+@dataclass(frozen=True)
+class ApprovalRequired:
+    approval_id: str
+    decision: PolicyDecision
+
+
 class AdapterOutcome(PaymentModel):
     """Sanitized adapter output; never a raw provider response."""
 
-    status: Literal["COMPLETED", "ORDER_CREATED", "CAPTURE_COMPLETED"]
+    status: Literal["COMPLETED", "FAILED", "ORDER_CREATED", "CAPTURE_COMPLETED"]
     provider_order_id: str | None = None
     provider_capture_id: str | None = None
 
@@ -114,7 +121,9 @@ class OperationStore(Protocol):
         """Atomically transition only a matching RESERVED operation to a terminal state."""
         ...
 
-    def mark_dispatch_intent(self, operation_id: str, fingerprint: str) -> bool:
+    def mark_dispatch_intent(
+        self, operation_id: str, fingerprint: str, *, require_kill_switch: bool = False
+    ) -> bool:
         """Durably mark that a provider request may be sent before adapter invocation."""
         ...
 
@@ -144,11 +153,15 @@ class InMemoryOperationStore:
                 raise RuntimeError("operation is not reserved")
             self._records[operation_id] = (fingerprint, Reservation(result.status, result))
 
-    def mark_dispatch_intent(self, operation_id: str, fingerprint: str) -> bool:
+    def mark_dispatch_intent(
+        self, operation_id: str, fingerprint: str, *, require_kill_switch: bool = False
+    ) -> bool:
         with self._lock:
             existing = self._records.get(operation_id)
             if (existing is None or existing[0] != fingerprint
                     or existing[1].state != "RESERVED"):
+                return False
+            if require_kill_switch:
                 return False
             return True
 
@@ -194,6 +207,7 @@ class PaymentGateway:
     def submit(
         self, intent: PaymentIntent, context: AuthenticatedScope,
         *, advisory_signals: tuple[Literal["request_review"], ...] = (),
+        approval_id: str | None = None,
     ) -> GatewayResult:
         started = time.perf_counter()
         if not isinstance(intent, PaymentIntent) or not isinstance(context, AuthenticatedScope):
@@ -206,51 +220,70 @@ class PaymentGateway:
                 trace_id=intent.trace_id,
                 operation_id=intent.operation_id,
                 payment_intent_id=intent.intent_id,
+                approval_id=approval_id,
                 action=intent.action,
+                amount_text=str(intent.money.amount),
+                currency=intent.money.currency,
                 actor_role="application",
             )
         )
-        result = self._submit_inner(intent, context, advisory_signals=advisory_signals)
+        result = self._submit_inner(
+            intent, context, advisory_signals=advisory_signals, approval_id=approval_id
+        )
         decision = result.decision.outcome if result.decision else None
         if result.decision is not None:
-            self._publish_decision_event(intent, result.decision)
-        result_type = {
-            "COMPLETED": "PAYMENT_COMPLETED",
-            "UNCERTAIN": "PAYMENT_UNCERTAIN",
-            "REVIEW_REQUIRED": "PAYMENT_REVIEW_REQUIRED",
-            "REJECTED": "PAYMENT_BLOCKED",
-        }.get(result.status)
-        if result_type is not None:
+            self._publish_decision_event(intent, result.decision, approval_id=approval_id)
+        result_types = {
+            "COMPLETED": ("PAYMENT_COMPLETED",),
+            "UNCERTAIN": ("PAYMENT_UNCERTAIN",),
+            "REVIEW_REQUIRED": ("PAYMENT_REVIEW_REQUIRED",),
+            "REJECTED": ("PAYMENT_BLOCKED", "PAYMENT_REJECTED"),
+        }.get(result.status, ())
+        if result.reason_codes == ("PROVIDER_CONFIRMED_FAILURE",):
+            result_types = ("PAYMENT_FAILED",)
+        if result_types:
             provider_outcome = (
                 "created" if result.status == "COMPLETED" and intent.action == "create_order"
                 else "captured" if result.status == "COMPLETED"
+                else "failed" if result.reason_codes == ("PROVIDER_CONFIRMED_FAILURE",)
                 else "uncertain" if result.status == "UNCERTAIN"
                 else "blocked" if result.status == "REJECTED"
                 else "not_started"
             )
             reason_codes = (
-                result.decision.reason_codes if result.decision is not None
+                tuple(dict.fromkeys((*result.decision.reason_codes, *result.reason_codes)))
+                if result.reason_codes == ("PROVIDER_CONFIRMED_FAILURE",)
+                and result.decision is not None
+                else result.decision.reason_codes if result.decision is not None
                 else result.reason_codes
             )
-            self._publish_telemetry(
-                build_payment_event(
-                    event_type=result_type,
-                    trace_id=intent.trace_id,
-                    operation_id=intent.operation_id,
-                    payment_intent_id=intent.intent_id,
-                    action=intent.action,
-                    gateway_decision=decision or ("BLOCK" if result.status == "REJECTED" else None),
-                    reason_codes=reason_codes,
-                    duration_ms=(time.perf_counter() - started) * 1000,
-                    provider_outcome_category=provider_outcome,
-                    actor_role="application",
+            for result_type in result_types:
+                self._publish_telemetry(
+                    build_payment_event(
+                        event_type=result_type,
+                        trace_id=intent.trace_id,
+                        operation_id=intent.operation_id,
+                        payment_intent_id=intent.intent_id,
+                        action=intent.action,
+                        amount_text=str(intent.money.amount),
+                        currency=intent.money.currency,
+                        gateway_decision=decision or ("BLOCK" if result.status == "REJECTED" else None),
+                        policy_version=result.decision.policy_version if result.decision else None,
+                        approval_id=(
+                            result.decision.audit_metadata.approval_id if result.decision else approval_id
+                        ),
+                        reason_codes=reason_codes,
+                        duration_ms=(time.perf_counter() - started) * 1000,
+                        provider_outcome_category=provider_outcome,
+                        actor_role="application",
+                    )
                 )
-            )
         return result
 
     def _submit_inner(
         self, intent: PaymentIntent, context: AuthenticatedScope,
         *, advisory_signals: tuple[Literal["request_review"], ...] = (),
+        approval_id: str | None = None,
     ) -> GatewayResult:
         """Context must originate at an authenticated app boundary, never from the AI."""
         if not isinstance(intent, PaymentIntent) or not isinstance(context, AuthenticatedScope):
@@ -299,7 +332,7 @@ class PaymentGateway:
             decision = self._policy.evaluate(intent, context, advisory_signals=advisory_signals)
         except Exception:
             return self._finalize(intent, fingerprint, None, "REJECTED", "POLICY_FAILURE")
-        self._publish_decision_event(intent, decision)
+        self._publish_decision_event(intent, decision, approval_id=approval_id)
         if decision.outcome == "BLOCK":
             return self._finalize(intent, fingerprint, decision, "REJECTED", "POLICY_BLOCK")
         if decision.outcome == "REVIEW":
@@ -327,12 +360,19 @@ class PaymentGateway:
             return self._finalize(intent, fingerprint, decision, "REJECTED", "AUTHORIZATION_CONSUMPTION_FAILED")
 
         try:
-            marked = self._operations.mark_dispatch_intent(intent.operation_id, fingerprint)
+            if self._kill_switch is None:
+                marked = self._operations.mark_dispatch_intent(intent.operation_id, fingerprint)
+            else:
+                marked = self._operations.mark_dispatch_intent(
+                    intent.operation_id, fingerprint, require_kill_switch=True
+                )
         except Exception:
             return self._finalize(
                 intent, fingerprint, decision, "REJECTED", "DISPATCH_INTENT_FAILED"
             )
         if marked is not True:
+            if self._kill_switch_is_active():
+                return self._block_for_kill_switch(intent, fingerprint)
             return self._finalize(
                 intent, fingerprint, decision, "REJECTED", "DISPATCH_INTENT_FAILED"
             )
@@ -344,7 +384,11 @@ class PaymentGateway:
                 operation_id=intent.operation_id,
                 payment_intent_id=intent.intent_id,
                 action=intent.action,
+                amount_text=str(intent.money.amount),
+                currency=intent.money.currency,
                 gateway_decision=decision.outcome,
+                policy_version=decision.policy_version,
+                approval_id=decision.audit_metadata.approval_id,
                 reason_codes=decision.reason_codes,
                 provider_outcome_category="not_started",
                 actor_role="application",
@@ -355,6 +399,14 @@ class PaymentGateway:
             outcome = self._adapter.execute(intent)
             if not isinstance(outcome, AdapterOutcome):
                 raise ValueError("fake adapter returned invalid outcome")
+            if outcome.status == "FAILED":
+                return self._finalize(
+                    intent,
+                    fingerprint,
+                    decision,
+                    "REJECTED",
+                    "PROVIDER_CONFIRMED_FAILURE",
+                )
             if sandbox_enabled:
                 expected = "ORDER_CREATED" if intent.action == "create_order" else "CAPTURE_COMPLETED"
                 if (outcome.status != expected or outcome.provider_order_id is None
@@ -395,7 +447,14 @@ class PaymentGateway:
         self._publish_decision_event(intent, decision)
         return self._finalize(intent, fingerprint, decision, "REJECTED", "KILL_SWITCH_ACTIVE")
 
-    def _publish_decision_event(self, intent: PaymentIntent, decision: PolicyDecision) -> None:
+    def _publish_decision_event(
+        self,
+        intent: PaymentIntent,
+        decision: PolicyDecision,
+        *,
+        approval_id: str | None = None,
+    ) -> None:
+        effective_approval_id = approval_id or decision.audit_metadata.approval_id
         self._publish_telemetry(
             build_payment_event(
                 event_type="POLICY_EVALUATED",
@@ -403,8 +462,75 @@ class PaymentGateway:
                 operation_id=intent.operation_id,
                 payment_intent_id=intent.intent_id,
                 action=intent.action,
+                amount_text=str(intent.money.amount),
+                currency=intent.money.currency,
                 gateway_decision=decision.outcome,
+                policy_version=decision.policy_version,
                 reason_codes=decision.reason_codes,
+                approval_id=effective_approval_id,
+                actor_role="application",
+            )
+        )
+
+    def evaluate_approval_request(
+        self,
+        intent: PaymentIntent,
+        context: AuthenticatedScope,
+        *,
+        advisory_signals: tuple[Literal["request_review"], ...] = (),
+    ) -> PolicyDecision:
+        """Evaluate a pending human-review request without reserving payment execution."""
+        intent = PaymentIntent.model_validate(intent.model_dump(mode="python"))
+        context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
+        if self._kill_switch is None or self._kill_switch_is_active():
+            return PolicyDecision(
+                decision_id="decision_" + hashlib.sha256(
+                    f"{intent.operation_id}:kill_switch_active".encode("ascii")
+                ).hexdigest()[:24],
+                operation_id=intent.operation_id,
+                outcome="BLOCK",
+                reason_codes=("KILL_SWITCH_ACTIVE",),
+                policy_version=POLICY_VERSION,
+                evaluated_at=datetime.now(timezone.utc),
+                audit_metadata=PolicyAudit(authorization_lookup="skipped"),
+            )
+        return self._policy.evaluate(
+            intent,
+            context,
+            advisory_signals=advisory_signals,
+            allow_pending_approval=True,
+        )
+
+    def record_approval_request(self, intent: PaymentIntent, decision: PolicyDecision) -> None:
+        """Persist the review decision after its exact approval record is durable."""
+        if decision.outcome != "REVIEW" or decision.operation_id != intent.operation_id:
+            raise ValueError("a matching REVIEW decision is required")
+        self._publish_telemetry(
+            build_payment_event(
+                event_type="PAYMENT_PROPOSED",
+                trace_id=intent.trace_id,
+                operation_id=intent.operation_id,
+                payment_intent_id=intent.intent_id,
+                action=intent.action,
+                amount_text=str(intent.money.amount),
+                currency=intent.money.currency,
+                actor_role="application",
+            )
+        )
+        self._publish_decision_event(intent, decision)
+        self._publish_telemetry(
+            build_payment_event(
+                event_type="PAYMENT_REVIEW_REQUIRED",
+                trace_id=intent.trace_id,
+                operation_id=intent.operation_id,
+                payment_intent_id=intent.intent_id,
+                action=intent.action,
+                amount_text=str(intent.money.amount),
+                currency=intent.money.currency,
+                gateway_decision="REVIEW",
+                policy_version=decision.policy_version,
+                reason_codes=decision.reason_codes,
+                provider_outcome_category="not_started",
                 actor_role="application",
             )
         )
@@ -413,6 +539,22 @@ class PaymentGateway:
         if self._telemetry_publisher is None:
             return
         self._telemetry_publisher.publish(event)
+
+    def validate_approval_store(self, approval_store: ApprovalRequestStore) -> None:
+        if self._kill_switch is None:
+            raise ValueError("human approval requires a trusted kill-switch store")
+        paths = tuple(
+            getattr(dependency, "path", None)
+            for dependency in (self._operations, self._consumer, self._kill_switch, approval_store)
+        )
+        if any(path is None for path in paths):
+            raise ValueError("human approval requires shared durable safety stores")
+        try:
+            resolved_paths = tuple(Path(path).resolve() for path in paths)
+        except (OSError, TypeError, ValueError):
+            raise ValueError("human approval store paths could not be verified") from None
+        if len(set(resolved_paths)) != 1:
+            raise ValueError("approval and payment stores must share one SQLite database")
 
     def _finalize(
         self, intent: PaymentIntent, fingerprint: str, decision: PolicyDecision | None,
@@ -450,6 +592,23 @@ class AdvisorySignalProvider(Protocol):
     def signals_for(self, intent: PaymentIntent, context: AuthenticatedScope) -> tuple[Literal["request_review"], ...]: ...
 
 
+class ApprovalRequestStore(Protocol):
+    def create_approval(
+        self,
+        *,
+        intent: PaymentIntent,
+        context: AuthenticatedScope,
+        reason_codes: tuple[str, ...],
+        defer_telemetry: bool = False,
+    ) -> object: ...
+
+    def publish_approval_requested(self, record: object) -> None: ...
+
+    def approved_payment(
+        self, approval_id: str
+    ) -> tuple[PaymentIntent, AuthenticatedScope] | None: ...
+
+
 class TrustedGatewayEntryPoint:
     """Narrow facade: AI-facing callers can supply only an intent, never scope."""
 
@@ -465,3 +624,39 @@ class TrustedGatewayEntryPoint:
         context = self._context_provider.current_context()
         signals = self._advisory_provider.signals_for(intent, context) if self._advisory_provider else ()
         return self._gateway.submit(intent, context, advisory_signals=signals)
+
+    def submit_or_request_approval(
+        self, intent: PaymentIntent, approval_store: ApprovalRequestStore
+    ) -> GatewayResult | ApprovalRequired:
+        context = self._context_provider.current_context()
+        self._gateway.validate_approval_store(approval_store)
+        signals = self._advisory_provider.signals_for(intent, context) if self._advisory_provider else ()
+        decision = self._gateway.evaluate_approval_request(
+            intent, context, advisory_signals=signals
+        )
+        if decision.outcome != "REVIEW":
+            return self._gateway.submit(intent, context, advisory_signals=signals)
+        record = approval_store.create_approval(
+            intent=intent,
+            context=context,
+            reason_codes=decision.reason_codes,
+            defer_telemetry=True,
+        )
+        approval_id = str(getattr(record, "approval_id"))
+        self._gateway.record_approval_request(intent, decision)
+        approval_store.publish_approval_requested(record)
+        return ApprovalRequired(approval_id, decision)
+
+    def submit_approved(
+        self,
+        intent: PaymentIntent,
+        approved_context: AuthenticatedScope,
+        approval_id: str,
+    ) -> GatewayResult:
+        context = self._context_provider.current_context()
+        if context != approved_context:
+            raise PermissionError("approved payment context does not match the current trusted identity")
+        signals = self._advisory_provider.signals_for(intent, context) if self._advisory_provider else ()
+        return self._gateway.submit(
+            intent, context, advisory_signals=signals, approval_id=approval_id
+        )

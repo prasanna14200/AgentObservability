@@ -7,7 +7,7 @@ from threading import Event, Lock
 import pytest
 
 from agentsentinel.payment_gateway import (
-    AdapterOutcome, InMemoryOperationStore, PaymentGateway, TestOnlyAdapter,
+    AdapterOutcome, GatewayResult, InMemoryOperationStore, PaymentGateway, TestOnlyAdapter,
 )
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy
 from agentsentinel.schema.payment import Money, PaymentAuthorization, PaymentIntent
@@ -302,3 +302,16 @@ def test_invalid_intent_copy_is_rejected_before_reservation():
     with pytest.raises(ValueError):
         gateway.submit(unvalidated, CONTEXT)
     assert store.lookup_count == adapter.calls == 0
+
+
+def test_gateway_result_revalidates_identifiers_and_provider_ids():
+    valid = dict(
+        operation_id="operation_001",
+        decision=None,
+        status="REJECTED",
+        reason_codes=("POLICY_BLOCK",),
+    )
+    with pytest.raises(ValueError):
+        GatewayResult(**{**valid, "operation_id": "invalid id"})
+    with pytest.raises(ValueError):
+        GatewayResult(**{**valid, "provider_order_id": "invalid id"})

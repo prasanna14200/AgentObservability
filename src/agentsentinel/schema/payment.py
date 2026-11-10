@@ -119,11 +119,25 @@ class PaymentAuthorization(PaymentModel):
     status: Literal["issued", "revoked", "consumed", "expired"]
     closed_at: AwareDatetime | None = None
     record_origin: Literal["application_issued"]
+    approval_id: Identifier | None = None
+    approval_reason_codes: tuple[str, ...] = ()
 
-    @field_validator("authorization_id", "issuer_id", "scope_id", "intent_id", "operation_id", "target_order_id")
+    @field_validator(
+        "authorization_id", "issuer_id", "scope_id", "intent_id", "operation_id",
+        "target_order_id", "approval_id",
+    )
     @classmethod
     def valid_id(cls, value: str | None) -> str | None:
         return None if value is None else _check_id(value, "identifier")
+
+    @field_validator("approval_reason_codes")
+    @classmethod
+    def valid_approval_reasons(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        if len(value) > 20 or len(set(value)) != len(value):
+            raise ValueError("approval reasons must be unique and bounded")
+        if any(not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", reason) for reason in value):
+            raise ValueError("approval reasons must use the safe uppercase vocabulary")
+        return value
 
     @field_validator("merchant_id")
     @classmethod

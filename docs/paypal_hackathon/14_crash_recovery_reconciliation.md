@@ -18,13 +18,15 @@ The lifecycle is:
 4. `COMPLETED`, `REJECTED`, or `UNCERTAIN`: terminal or manually reconcilable
    result. An uncertain result is never automatically submitted again.
 
-The authorization claim remains the existing atomic execution-admission
-boundary, including the kill-switch check. After that claim commits, the
-operation is admitted/in-flight. A kill-switch transition committed afterward
-blocks later admissions; it does not cancel an already admitted operation.
-The dispatch marker is a later, conservative boundary: a crash after the
-marker but before the adapter call is still treated as possibly dispatched.
-SQLite cannot make a local commit atomic with a remote HTTP request.
+The authorization claim atomically consumes the authorization and checks the
+kill switch. The trusted gateway also checks the switch in the same SQLite
+transaction that commits the dispatch marker. If the switch is enabled after
+the claim but before that marker, dispatch is blocked; the consumed
+authorization is not restored or retried. Once the marker commits, the
+operation is in-flight and a later switch activation cannot cancel an adapter
+call already beginning. A crash after the marker but before the adapter call
+is still treated as possibly dispatched. SQLite cannot make a local commit
+atomic with a remote HTTP request.
 
 ## Recovery behavior
 
@@ -62,10 +64,11 @@ uncertain instead.
 
 - Deterministic policy `BLOCK`, exact-bound authorization, budgets, and
   idempotency are unchanged.
-- Kill-switch admission and authorization claim continue to use the same
-  SQLite file and serialized transaction boundary. Recovery does not execute
-  payments; a kill-switch activation racing recovery is serialized by SQLite,
-  and subsequent submissions are still blocked while active.
+- Authorization claim and dispatch-marker admission both check the kill
+  switch through the same SQLite file and serialized transaction boundary.
+  Recovery does not execute payments; a kill-switch activation racing either
+  transaction is serialized by SQLite, and subsequent submissions are still
+  blocked while active.
 - Database failure, missing/invalid dispatch evidence, verifier failure, and
   mismatched operation/attempt/idempotency evidence fail closed.
 - A `NOT_DISPATCHED` result is a terminal classification, not permission to

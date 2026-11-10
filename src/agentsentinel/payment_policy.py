@@ -27,6 +27,7 @@ ReasonCode = Literal[
     "AUTHORIZATION_TARGET_MISMATCH", "AUTHORIZATION_INACTIVE",
     "AUTHORIZATION_NOT_YET_VALID", "AUTHORIZATION_EXPIRED",
     "REVIEW_ADVISORY_SIGNAL",
+    "HUMAN_APPROVAL_ACCEPTED",
     "LOOP_LIMIT_EXCEEDED", "OPERATION_LOOP_LIMIT", "TRACE_LOOP_LIMIT",
     "BUDGET_EXCEEDED", "DAILY_BUDGET_LIMIT", "MERCHANT_BUDGET_LIMIT",
     "KILL_SWITCH_ACTIVE",
@@ -55,6 +56,12 @@ class PolicyAudit(PaymentModel):
     """Fixed safe audit vocabulary; no raw requests or provider payloads."""
 
     authorization_lookup: Literal["skipped", "found", "missing", "error"]
+    approval_id: str | None = None
+
+    @field_validator("approval_id")
+    @classmethod
+    def valid_approval_id(cls, value: str | None) -> str | None:
+        return None if value is None else _check_id(value, "approval identifier")
 
 
 class PolicyDecision(PaymentModel):
@@ -110,12 +117,15 @@ class PaymentPolicy:
     def evaluate(
         self, intent: PaymentIntent, context: AuthenticatedScope,
         *, advisory_signals: tuple[Literal["request_review"], ...] = (),
+        allow_pending_approval: bool = False,
     ) -> PolicyDecision:
         """No authorization payload parameter; caller must control context and repository."""
         if not isinstance(intent, PaymentIntent) or not isinstance(context, AuthenticatedScope):
             raise TypeError("validated intent and authenticated context are required")
         if not isinstance(advisory_signals, tuple) or any(signal != "request_review" for signal in advisory_signals):
             raise ValueError("unsupported advisory signal")
+        if type(allow_pending_approval) is not bool:
+            raise TypeError("approval-request mode must be a trusted boolean")
         now = self._clock()
         if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("trusted clock must return a timezone-aware datetime; no decision issued")
@@ -132,6 +142,7 @@ class PaymentPolicy:
 
         lookup: Literal["skipped", "found", "missing", "error"] = "skipped"
         authorization: PaymentAuthorization | None = None
+        review_requested = intent.money.amount > self._config.review_above_usd or bool(advisory_signals)
         if not hard:
             try:
                 authorization = self._repository.find(context, intent.intent_id, intent.operation_id)
@@ -148,14 +159,29 @@ class PaymentPolicy:
                 hard.append("AUTHORIZATION_LOOKUP_FAILED")
 
             if lookup == "missing":
-                hard.append("AUTHORIZATION_MISSING")
+                if not (allow_pending_approval and review_requested):
+                    hard.append("AUTHORIZATION_MISSING")
             elif authorization is not None:
                 hard.extend(self._check_authorization(authorization, intent, context, now))
 
         if hard:
             outcome: Outcome = "BLOCK"
             reasons: tuple[ReasonCode, ...] = tuple(hard)
-        elif intent.money.amount > self._config.review_above_usd or advisory_signals:
+        elif (
+            review_requested
+            and authorization is not None
+            and authorization.approval_id is not None
+            and (
+                intent.money.amount <= self._config.review_above_usd
+                or "REVIEW_AMOUNT_THRESHOLD" in authorization.approval_reason_codes
+            )
+            and (
+                not advisory_signals
+                or "REVIEW_ADVISORY_SIGNAL" in authorization.approval_reason_codes
+            )
+        ):
+            outcome, reasons = "ALLOW", ("HUMAN_APPROVAL_ACCEPTED",)
+        elif review_requested:
             review_reasons: list[ReasonCode] = []
             if intent.money.amount > self._config.review_above_usd:
                 review_reasons.append("REVIEW_AMOUNT_THRESHOLD")
@@ -178,7 +204,10 @@ class PaymentPolicy:
             reason_codes=reasons,
             policy_version=POLICY_VERSION,
             evaluated_at=now,
-            audit_metadata=PolicyAudit(authorization_lookup=lookup),
+            audit_metadata=PolicyAudit(
+                authorization_lookup=lookup,
+                approval_id=authorization.approval_id if authorization is not None else None,
+            ),
         )
 
     @staticmethod

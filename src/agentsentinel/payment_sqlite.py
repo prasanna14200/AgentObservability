@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from abc import ABC, abstractmethod
@@ -206,6 +207,7 @@ class SQLitePaymentStore:
                         expires_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN
                           ('issued','revoked','consumed','expired')),
                         closed_at TEXT, record_origin TEXT NOT NULL CHECK(record_origin='application_issued'),
+                        approval_id TEXT, approval_reason_codes TEXT,
                         UNIQUE(principal_id, scope_id, intent_id, operation_id)
                     );
                     CREATE TABLE IF NOT EXISTS operation_events (
@@ -225,12 +227,21 @@ class SQLitePaymentStore:
                     operation_columns = {
                         row["name"] for row in conn.execute("PRAGMA table_info(operations)")
                     }
-                    if "dispatch_state" not in operation_columns:
+                    dispatch_state_was_missing = "dispatch_state" not in operation_columns
+                    if dispatch_state_was_missing:
                         conn.execute(
                             "ALTER TABLE operations ADD COLUMN dispatch_state TEXT NOT NULL "
                             "DEFAULT 'NOT_DISPATCHED' CHECK(dispatch_state IN "
                             "('NOT_DISPATCHED','MAY_HAVE_DISPATCHED'))"
                         )
+                    authorization_columns = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(authorizations)")
+                    }
+                    if "approval_id" not in authorization_columns:
+                        conn.execute("ALTER TABLE authorizations ADD COLUMN approval_id TEXT")
+                    if "approval_reason_codes" not in authorization_columns:
+                        conn.execute("ALTER TABLE authorizations ADD COLUMN approval_reason_codes TEXT")
+                    if dispatch_state_was_missing:
                         conn.execute(
                             "UPDATE operations SET dispatch_state='MAY_HAVE_DISPATCHED' "
                             "WHERE state IN ('CLAIMED','UNCERTAIN','COMPLETED')"
@@ -353,6 +364,10 @@ class SQLitePaymentStore:
             "issued_at": row["issued_at"], "expires_at": row["expires_at"],
             "status": row["status"], "closed_at": row["closed_at"],
             "record_origin": row["record_origin"],
+            "approval_id": row["approval_id"],
+            "approval_reason_codes": tuple(
+                json.loads(row["approval_reason_codes"] or "[]")
+            ),
         })
 
     def find(self, context: AuthenticatedScope, intent_id: str, operation_id: str) -> PaymentAuthorization | None:
@@ -443,11 +458,28 @@ class SQLitePaymentStore:
         except Exception:
             raise StoreUnavailable("authorization claim unavailable") from None
 
-    def mark_dispatch_intent(self, operation_id: str, fingerprint: str) -> bool:
-        """Commit the conservative provider-dispatch boundary before external I/O."""
+    def mark_dispatch_intent(
+        self, operation_id: str, fingerprint: str, *, require_kill_switch: bool = False
+    ) -> bool:
+        """Serialize switch admission and the conservative provider-dispatch boundary."""
         try:
             now = self._now()
             with self._write() as conn:
+                if require_kill_switch:
+                    has_kill_switch = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kill_switch'"
+                    ).fetchone()
+                    if has_kill_switch is None:
+                        raise StoreUnavailable("kill switch state unavailable")
+                    kill_switch = conn.execute(
+                        "SELECT enabled FROM kill_switch WHERE key='payment_kill_switch'"
+                    ).fetchone()
+                    if kill_switch is None or type(kill_switch["enabled"]) is not int:
+                        raise StoreUnavailable("kill switch state unavailable")
+                    if kill_switch["enabled"] not in (0, 1):
+                        raise StoreUnavailable("kill switch state unavailable")
+                    if kill_switch["enabled"] == 1:
+                        return False
                 changed = conn.execute(
                     "UPDATE operations SET dispatch_state='MAY_HAVE_DISPATCHED',updated_at=? "
                     "WHERE operation_id=? AND fingerprint=? AND state='CLAIMED' "
@@ -484,7 +516,11 @@ class SQLitePaymentStore:
                             or (result.status in {"COMPLETED", "UNCERTAIN"}
                                 and row["dispatch_state"] != "MAY_HAVE_DISPATCHED")
                             or (result.status == "REJECTED"
+                                and result.reason_codes != ("PROVIDER_CONFIRMED_FAILURE",)
                                 and row["dispatch_state"] != "NOT_DISPATCHED")
+                            or (result.reason_codes == ("PROVIDER_CONFIRMED_FAILURE",)
+                                and (result.status != "REJECTED"
+                                     or row["dispatch_state"] != "MAY_HAVE_DISPATCHED"))
                             or result.status not in {"COMPLETED", "UNCERTAIN", "REJECTED"}
                         ))
                         or row["state"] not in {"RESERVED", "CLAIMED"}):

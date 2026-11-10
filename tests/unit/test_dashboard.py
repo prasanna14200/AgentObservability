@@ -14,6 +14,7 @@ from agentsentinel.observability.payment_audit import PaymentAuditChain
 from agentsentinel.observability.payment_events import build_payment_event
 from agentsentinel.payment_policy import AuthenticatedScope
 from agentsentinel.schema.payment import Money, PaymentIntent
+from agentsentinel.schema.payment_telemetry import PaymentEventType
 
 APPROVER_SECRET = "approver-secret-for-dashboard-tests-0001"
 VIEWER_SECRET = "viewer-secret-for-dashboard-tests-0001"
@@ -49,7 +50,7 @@ def append_trace(
     path: Path,
     trace_id: str,
     operation_id: str,
-    events: tuple[tuple[str, str | None, tuple[str, ...]], ...],
+    events: tuple[tuple[PaymentEventType, str | None, tuple[str, ...]], ...],
 ) -> None:
     chain = PaymentAuditChain(path)
     for index, (event_type, decision, reasons) in enumerate(events):

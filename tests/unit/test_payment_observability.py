@@ -21,7 +21,7 @@ from agentsentinel.payment_gateway import AdapterOutcome, PaymentGateway, TestOn
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy
 from agentsentinel.payment_sqlite import SQLitePaymentStore
 from agentsentinel.schema.payment import Money, PaymentIntent
-from agentsentinel.schema.payment_telemetry import PaymentTelemetryEvent
+from agentsentinel.schema.payment_telemetry import PaymentEventType, PaymentTelemetryEvent
 
 NOW = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
 CONTEXT = AuthenticatedScope(principal_id="payment_user", scope_id="payment_scope")
@@ -42,7 +42,10 @@ def make_intent(operation_id: str = "payment_op_001", amount: str = "4.00") -> P
     )
 
 
-def make_event(event_id: str = "evt_audit_001", event_type: str = "PAYMENT_PROPOSED"):
+def make_event(
+    event_id: str = "evt_audit_001",
+    event_type: PaymentEventType = "PAYMENT_PROPOSED",
+):
     return build_payment_event(
         event_type=event_type,
         trace_id="payment_trace_001",
@@ -94,6 +97,7 @@ def test_gateway_and_approval_events_share_trace_and_span_correlation(tmp_path):
     assert [item["event_type"] for item in payloads] == [
         "APPROVAL_REQUESTED",
         "APPROVAL_APPROVED",
+        "APPROVAL_GRANTED",
         "PAYMENT_PROPOSED",
         "POLICY_EVALUATED",
         "PAYMENT_DISPATCHED",

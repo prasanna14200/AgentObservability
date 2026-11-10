@@ -1,6 +1,6 @@
 {
   "version": "v4",
-  "generated_at": "2026-10-12T03:01:22+00:00",
+  "generated_at": "2026-11-09T17:05:45+00:00",
   "input_source": "data\\processed\\v4\\traces.parquet",
   "split_protocol": "earliest 80% of traces by start time for training; latest 20% for test",
   "cutoff_time": "2026-01-02T09:48:00+00:00",

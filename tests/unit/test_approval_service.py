@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -120,3 +121,62 @@ def test_approval_store_kill_switch_fails_closed_and_blocks_new_issuance(tmp_pat
 
     with pytest.raises(ValueError, match="kill switch active"):
         store.create_approval(intent=make_intent(operation_id="op_approval_kill_2"), context=context)
+
+
+def test_approval_creation_and_issuance_audit_are_transactional(tmp_path):
+    db = tmp_path / "approval_audit_transaction.sqlite"
+    store = ApprovalStore(db, ttl_seconds=3600, clock=lambda: NOW)
+    context = AuthenticatedScope(principal_id="principal_001", scope_id="scope_001")
+    intent = make_intent(operation_id="op_approval_audit")
+
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """CREATE TRIGGER reject_approval_audit BEFORE INSERT ON approval_events
+            WHEN NEW.action='approval_created'
+            BEGIN SELECT RAISE(ABORT, 'test audit failure'); END"""
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.create_approval(intent=intent, context=context)
+    assert store.list_approvals() == []
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TRIGGER reject_approval_audit")
+    pending = store.create_approval(intent=intent, context=context)
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            """CREATE TRIGGER reject_approval_audit BEFORE INSERT ON approval_events
+            WHEN NEW.action='approval_approved'
+            BEGIN SELECT RAISE(ABORT, 'test audit failure'); END"""
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        store.approve_approval(pending.approval_id)
+    assert store.get_approval(pending.approval_id).status == "PENDING"
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (pending.operation_id,),
+        ).fetchone()[0] == 0
+
+
+def test_approval_api_requires_matching_csrf_token(tmp_path):
+    secret = "b" * 40
+    app = create_app(db_path=tmp_path / "csrf.sqlite", approver_secret=secret)
+    client = TestClient(app)
+    store = app.state.approval_store
+    context = AuthenticatedScope(principal_id="principal_001", scope_id="scope_001")
+    record = store.create_approval(intent=make_intent(), context=context)
+    headers = {"Authorization": "Bearer " + secret}
+
+    missing = client.post(
+        f"/approvals/{record.approval_id}/approve",
+        json={"request_fingerprint": record.request_fingerprint},
+        headers=headers,
+    )
+    mismatched = client.post(
+        f"/approvals/{record.approval_id}/approve",
+        json={"request_fingerprint": record.request_fingerprint},
+        headers={**headers, "X-CSRF-Token": "token-a", "Cookie": "csrf_token=token-b"},
+    )
+
+    assert missing.status_code == mismatched.status_code == 403
+    assert store.get_approval(record.approval_id).status == "PENDING"

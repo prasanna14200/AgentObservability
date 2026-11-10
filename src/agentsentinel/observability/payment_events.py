@@ -31,7 +31,10 @@ def build_payment_event(
     payment_intent_id: str | None = None,
     approval_id: str | None = None,
     action: str | None = None,
+    amount_text: str | None = None,
+    currency: str | None = None,
     gateway_decision: str | None = None,
+    policy_version: str | None = None,
     reason_codes: tuple[str, ...] = (),
     duration_ms: float | None = None,
     provider_outcome_category: str | None = None,
@@ -47,30 +50,38 @@ def build_payment_event(
     correlation = trace_id or approval_id or "system"
     operation = operation_id or approval_id or "system"
     occurrence = occurred_at.isoformat() if operation_id is None and approval_id is None else ""
-    identity = f"{correlation}|{operation}|{approval_id or ''}|{event_type}|{occurrence}"
-    span_id = _stable_id("span_", identity)
+    identity = (
+        f"{correlation}|{operation}|{approval_id or ''}|{payment_intent_id or ''}|"
+        f"{action or ''}|{amount_text or ''}|{currency or ''}|{event_type}|{occurrence}"
+    )
+    span_id = _stable_id("span_", f"{correlation}|{operation}|{event_type}|{occurrence}")
     parent_event_type = {
         "POLICY_EVALUATED": "PAYMENT_PROPOSED",
         "PAYMENT_DISPATCHED": "POLICY_EVALUATED",
         "PAYMENT_COMPLETED": "PAYMENT_DISPATCHED",
+        "PAYMENT_FAILED": "PAYMENT_DISPATCHED",
         "PAYMENT_UNCERTAIN": "PAYMENT_DISPATCHED",
         "PAYMENT_BLOCKED": "POLICY_EVALUATED",
+        "PAYMENT_REJECTED": "POLICY_EVALUATED",
         "PAYMENT_REVIEW_REQUIRED": "POLICY_EVALUATED",
         "APPROVAL_REQUESTED": "POLICY_EVALUATED",
         "APPROVAL_APPROVED": "APPROVAL_REQUESTED",
+        "APPROVAL_GRANTED": "APPROVAL_REQUESTED",
         "APPROVAL_REJECTED": "APPROVAL_REQUESTED",
         "APPROVAL_EXPIRED": "APPROVAL_REQUESTED",
     }.get(event_type)
-    parent_approval_id = None if event_type == "APPROVAL_REQUESTED" else approval_id
     parent_span_id = (
         _stable_id(
             "span_",
-            f"{correlation}|{operation}|{parent_approval_id or ''}|{parent_event_type}|{occurrence}",
+            f"{correlation}|{operation}|{parent_event_type}|{occurrence}",
         )
         if parent_event_type
         else None
     )
-    event_id = _stable_id("evt_", identity)
+    event_identity = identity
+    if event_type == "POLICY_EVALUATED":
+        event_identity += f"|{gateway_decision or ''}|{','.join(reason_codes)}"
+    event_id = _stable_id("evt_", event_identity)
     return PaymentTelemetryEvent(
         event_id=event_id,
         timestamp=occurred_at,
@@ -81,8 +92,11 @@ def build_payment_event(
         payment_intent_id=payment_intent_id,
         approval_id=approval_id,
         action=action,
+        amount_text=amount_text,
+        currency=currency,
         event_type=event_type,
         gateway_decision=gateway_decision,
+        policy_version=policy_version,
         reason_codes=reason_codes,
         duration_ms=duration_ms,
         provider_outcome_category=provider_outcome_category,

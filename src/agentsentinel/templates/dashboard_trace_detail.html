@@ -7,8 +7,15 @@
       <a href="/dashboard/traces">← Back to traces</a><p class="eyebrow">CORRELATED PAYMENT SPANS</p><h1>Trace {{ trace.trace_id }}</h1>
       <section class="metric-grid compact">
         <article class="metric-card"><p class="metric-label">Operation</p><strong>{{ trace.operation_id }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Payment intent</p><strong>{{ trace.payment_intent_id }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Approval</p><strong>{{ trace.approval_id }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Amount</p><strong>{{ trace.amount_text }} {{ trace.currency }}</strong></article>
         <article class="metric-card"><p class="metric-label">Decision</p><strong>{{ trace.decision }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Policy</p><strong>{{ trace.policy_version }}</strong></article>
         <article class="metric-card"><p class="metric-label">Provider outcome</p><strong>{{ trace.provider_outcome }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Operation state</p><strong>{{ trace.operation_state }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Dispatch state</p><strong>{{ trace.dispatch_state }}</strong></article>
+        <article class="metric-card"><p class="metric-label">Reconciliation</p><strong>{{ trace.reconciliation_state }}</strong></article>
         <article class="metric-card"><p class="metric-label">Anomaly signal</p><strong>{{ trace.anomaly_signal }}</strong></article>
       </section>
       <section class="panel"><h2>Chronological event and span timeline</h2>
@@ -16,6 +23,8 @@
           <ol class="timeline">{% for event in events %}
             <li><time>{{ event.timestamp }}</time><div><strong>{{ event.event_type }}</strong><span class="muted"> · {{ event.gateway_decision or 'No decision' }} · sequence {{ event.sequence_number }}</span>
               <p>Span {{ event.span_id or 'No span' }}{% if event.parent_span_id %} · parent {{ event.parent_span_id }}{% endif %}</p>
+              <p>Policy: {{ event.policy_version or 'No data' }} · Approval: {{ event.approval_id or 'No data' }}</p>
+              <p>Intent: {{ event.payment_intent_id or 'No data' }} · Amount: {{ event.amount_text or 'No data' }} {{ event.currency or '' }}</p>
               <p>Reasons: {{ event.reason_codes | join(', ') if event.reason_codes else 'None' }} · Provider: {{ event.provider_outcome_category or 'No data' }}</p>
               {% if event.detector_version %}<p>Advisory: {{ event.detector_version }} score {{ event.anomaly_score }} (not confirmed fraud)</p>{% endif %}
             </div></li>

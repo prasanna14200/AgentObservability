@@ -118,6 +118,8 @@ class ApprovalStore:
                 payment_intent_id=record.intent_id,
                 approval_id=record.approval_id,
                 action=record.action,
+                amount_text=record.amount_text,
+                currency=record.currency,
                 reason_codes=(safe_reason,) if safe_reason else (),
                 actor_role=safe_actor,
             )
@@ -176,7 +178,8 @@ class ApprovalStore:
                         expires_at TEXT NOT NULL,
                         status TEXT NOT NULL CHECK(status IN ('PENDING','APPROVED','REJECTED','EXPIRED')),
                         reason_codes TEXT NOT NULL,
-                        decision_reason TEXT
+                        decision_reason TEXT,
+                        intent_snapshot TEXT
                     );
                     CREATE TABLE IF NOT EXISTS authorizations (
                         authorization_id TEXT PRIMARY KEY,
@@ -195,6 +198,8 @@ class ApprovalStore:
                         status TEXT NOT NULL CHECK(status IN ('issued','revoked','consumed','expired')),
                         closed_at TEXT,
                         record_origin TEXT NOT NULL CHECK(record_origin='application_issued'),
+                        approval_id TEXT,
+                        approval_reason_codes TEXT,
                         UNIQUE(principal_id, scope_id, intent_id, operation_id)
                     );
                     CREATE TABLE IF NOT EXISTS approval_events (
@@ -214,11 +219,30 @@ class ApprovalStore:
                     );
                     """
                 )
-                if existing_tables == 0:
-                    conn.execute(
-                        "INSERT INTO kill_switch(key,enabled,updated_at,reason_code) VALUES(?,?,?,?)",
-                        ("payment_kill_switch", 0, self._now().isoformat(), "KILL_SWITCH_DISABLED"),
-                    )
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    approval_columns = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(approvals)")
+                    }
+                    if "intent_snapshot" not in approval_columns:
+                        conn.execute("ALTER TABLE approvals ADD COLUMN intent_snapshot TEXT")
+                    authorization_columns = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(authorizations)")
+                    }
+                    if "approval_id" not in authorization_columns:
+                        conn.execute("ALTER TABLE authorizations ADD COLUMN approval_id TEXT")
+                    if "approval_reason_codes" not in authorization_columns:
+                        conn.execute("ALTER TABLE authorizations ADD COLUMN approval_reason_codes TEXT")
+                    if existing_tables == 0:
+                        conn.execute(
+                            "INSERT INTO kill_switch(key,enabled,updated_at,reason_code) VALUES(?,?,?,?)",
+                            ("payment_kill_switch", 0, self._now().isoformat(), "KILL_SWITCH_DISABLED"),
+                        )
+                    conn.execute("COMMIT")
+                except BaseException:
+                    with suppress(sqlite3.Error):
+                        conn.execute("ROLLBACK")
+                    raise
         except sqlite3.Error as exc:  # pragma: no cover - defensive
             raise RuntimeError("approval store initialization unavailable") from exc
 
@@ -292,6 +316,7 @@ class ApprovalStore:
         reason_codes: tuple[str, ...] = ("PENDING",),
         approval_id: str | None = None,
         expires_at: datetime | None = None,
+        defer_telemetry: bool = False,
     ) -> ApprovalRecord:
         intent = PaymentIntent.model_validate(intent.model_dump(mode="python"))
         context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
@@ -329,7 +354,7 @@ class ApprovalStore:
                 decision_reason="PENDING",
             )
             conn.execute(
-                "INSERT INTO approvals(approval_id,operation_id,trace_id,intent_id,principal_id,scope_id,action,merchant_id,amount_text,currency,target_order_id,request_fingerprint,created_at,expires_at,status,reason_codes,decision_reason) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO approvals(approval_id,operation_id,trace_id,intent_id,principal_id,scope_id,action,merchant_id,amount_text,currency,target_order_id,request_fingerprint,created_at,expires_at,status,reason_codes,decision_reason,intent_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     row.approval_id,
                     row.operation_id,
@@ -348,16 +373,29 @@ class ApprovalStore:
                     row.status,
                     json.dumps(list(row.reason_codes)),
                     row.decision_reason,
+                    intent.model_dump_json(),
                 ),
             )
-        self._event(approval_id, actor_role="system", action="approval_created", reason_code="APPROVAL_CREATED")
+            self._event(
+                approval_id,
+                actor_role="system",
+                action="approval_created",
+                reason_code="APPROVAL_CREATED",
+                conn=conn,
+            )
         record = self.get_approval(approval_id)
         if record is None:
             raise RuntimeError("created approval could not be read")
+        if not defer_telemetry:
+            self.publish_approval_requested(record)
+        return record
+
+    def publish_approval_requested(self, record: object) -> None:
+        if not isinstance(record, ApprovalRecord):
+            raise TypeError("approval record required")
         self._publish_approval_event(
             "APPROVAL_REQUESTED", record, actor_role="system", reason_code="APPROVAL_CREATED"
         )
-        return record
 
     def create_from_intent(self, intent: PaymentIntent, context: AuthenticatedScope, **kwargs: Any) -> ApprovalRecord:
         return self.create_approval(intent=intent, context=context, **kwargs)
@@ -366,6 +404,74 @@ class ApprovalStore:
         with closing(self._connect()) as conn:
             row = conn.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
         return None if row is None else self._row_to_approval(row)
+
+    def approved_payment(
+        self, approval_id: str
+    ) -> tuple[PaymentIntent, AuthenticatedScope] | None:
+        """Return the exact persisted request only after its human approval committed."""
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                """
+                SELECT a.*, z.authorization_id, z.issuer_id, z.principal_id AS auth_principal_id,
+                       z.scope_id AS auth_scope_id, z.intent_id AS auth_intent_id,
+                       z.operation_id AS auth_operation_id, z.merchant_id AS auth_merchant_id,
+                       z.amount_text AS auth_amount_text, z.currency AS auth_currency,
+                       z.action AS auth_action, z.target_order_id AS auth_target_order_id,
+                       z.issued_at AS auth_issued_at, z.expires_at AS auth_expires_at,
+                       z.status AS auth_status, z.closed_at AS auth_closed_at,
+                       z.record_origin AS auth_record_origin, z.approval_id AS auth_approval_id,
+                       z.approval_reason_codes AS auth_approval_reason_codes
+                FROM approvals a
+                JOIN authorizations z ON z.operation_id=a.operation_id
+                WHERE a.approval_id=?
+                """,
+                (approval_id,),
+            ).fetchone()
+        if row is None or row["status"] != "APPROVED" or not row["intent_snapshot"]:
+            return None
+        try:
+            intent = PaymentIntent.model_validate_json(row["intent_snapshot"])
+            context = AuthenticatedScope(
+                principal_id=row["principal_id"],
+                scope_id=row["scope_id"],
+            )
+            expected_fingerprint = hashlib.sha256(
+                (intent.model_dump_json() + "|" + context.model_dump_json()).encode("utf-8")
+            ).hexdigest()
+            authorization = PaymentAuthorization.model_validate({
+                "authorization_id": row["authorization_id"],
+                "issuer_id": row["issuer_id"],
+                "scope_id": row["auth_scope_id"],
+                "intent_id": row["auth_intent_id"],
+                "operation_id": row["auth_operation_id"],
+                "merchant_id": row["auth_merchant_id"],
+                "money": Money(amount=row["auth_amount_text"], currency=row["auth_currency"]),
+                "action": row["auth_action"],
+                "target_order_id": row["auth_target_order_id"],
+                "issued_at": row["auth_issued_at"],
+                "expires_at": row["auth_expires_at"],
+                "status": row["auth_status"],
+                "closed_at": row["auth_closed_at"],
+                "record_origin": row["auth_record_origin"],
+                "approval_id": row["auth_approval_id"],
+                "approval_reason_codes": tuple(
+                    json.loads(row["auth_approval_reason_codes"] or "[]")
+                ),
+            })
+            if (
+                expected_fingerprint != row["request_fingerprint"]
+                or authorization.issuer_id != self.trusted_issuer_id
+                or authorization.approval_id != approval_id
+                or authorization.approval_reason_codes != tuple(json.loads(row["reason_codes"]))
+                or authorization.status not in {"issued", "consumed"}
+                or not authorization.binds_to(intent)
+                or row["auth_principal_id"] != context.principal_id
+                or row["auth_scope_id"] != context.scope_id
+            ):
+                return None
+        except (ValueError, TypeError, KeyError):
+            return None
+        return intent, context
 
     def list_approvals(self, *, status: str | None = None) -> list[ApprovalRecord]:
         self.expire_pending_approvals()
@@ -408,11 +514,19 @@ class ApprovalStore:
                 raise ValueError("approval already terminal")
             if record.status in {"REJECTED", "EXPIRED"}:
                 raise ValueError("approval already terminal")
-            conn.execute(
+            changed = conn.execute(
                 "UPDATE approvals SET status='REJECTED', decision_reason=? WHERE approval_id=? and status='PENDING'",
                 (reason_code, approval_id),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("approval state transition unavailable")
+            self._event(
+                approval_id,
+                actor_role=actor_role,
+                action="approval_rejected",
+                reason_code=reason_code,
+                conn=conn,
             )
-        self._event(approval_id, actor_role=actor_role, action="approval_rejected", reason_code=reason_code)
         updated = self.get_approval(approval_id)
         if updated is None:
             raise RuntimeError("rejected approval could not be read")
@@ -465,14 +579,15 @@ class ApprovalStore:
                 expires_at=record.expires_at,
                 status="issued",
                 record_origin="application_issued",
+                approval_id=record.approval_id,
             )
             existing = conn.execute(
-                "SELECT authorization_id FROM authorizations WHERE principal_id=? AND scope_id=? AND intent_id=? AND operation_id=?",
+                "SELECT * FROM authorizations WHERE principal_id=? AND scope_id=? AND intent_id=? AND operation_id=?",
                 (record.principal_id, record.scope_id, record.intent_id, record.operation_id),
             ).fetchone()
             if existing is None:
                 conn.execute(
-                    "INSERT INTO authorizations(authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO authorizations(authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin,approval_id,approval_reason_codes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         auth.authorization_id,
                         auth.issuer_id,
@@ -490,18 +605,68 @@ class ApprovalStore:
                         auth.status,
                         None,
                         auth.record_origin,
+                        auth.approval_id,
+                        json.dumps(list(record.reason_codes)),
                     ),
                 )
-            conn.execute(
+            else:
+                existing_authorization = PaymentAuthorization.model_validate({
+                    "authorization_id": existing["authorization_id"],
+                    "issuer_id": existing["issuer_id"],
+                    "scope_id": existing["scope_id"],
+                    "intent_id": existing["intent_id"],
+                    "operation_id": existing["operation_id"],
+                    "merchant_id": existing["merchant_id"],
+                    "money": Money(amount=existing["amount_text"], currency=existing["currency"]),
+                    "action": existing["action"],
+                    "target_order_id": existing["target_order_id"],
+                    "issued_at": existing["issued_at"],
+                    "expires_at": existing["expires_at"],
+                    "status": existing["status"],
+                    "closed_at": existing["closed_at"],
+                    "record_origin": existing["record_origin"],
+                    "approval_id": existing["approval_id"],
+                    "approval_reason_codes": tuple(
+                        json.loads(existing["approval_reason_codes"] or "[]")
+                    ),
+                })
+                intent_snapshot = PaymentIntent.model_validate_json(
+                    conn.execute(
+                        "SELECT intent_snapshot FROM approvals WHERE approval_id=?",
+                        (approval_id,),
+                    ).fetchone()["intent_snapshot"]
+                )
+                if (
+                    existing_authorization.issuer_id != self.trusted_issuer_id
+                    or existing_authorization.status != "issued"
+                    or existing_authorization.approval_id not in {None, approval_id}
+                    or not existing_authorization.binds_to(intent_snapshot)
+                ):
+                    raise ValueError("existing authorization does not match approval")
+                conn.execute(
+                    "UPDATE authorizations SET approval_id=?,approval_reason_codes=? "
+                    "WHERE authorization_id=? AND approval_id IS NULL",
+                    (
+                        approval_id,
+                        json.dumps(list(record.reason_codes)),
+                        existing_authorization.authorization_id,
+                    ),
+                )
+            changed = conn.execute(
                 "UPDATE approvals SET status='APPROVED', decision_reason=? WHERE approval_id=? AND status='PENDING'",
                 (reason_code, approval_id),
-            )
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("approval state transition unavailable")
             self._event(approval_id, actor_role=actor_role, action="approval_approved", reason_code=reason_code, conn=conn)
         approved = self.get_approval(approval_id)
         if approved is None:
             raise RuntimeError("approved record could not be read")
         self._publish_approval_event(
             "APPROVAL_APPROVED", approved, actor_role=actor_role, reason_code=reason_code
+        )
+        self._publish_approval_event(
+            "APPROVAL_GRANTED", approved, actor_role=actor_role, reason_code=reason_code
         )
         return approved
 
@@ -527,7 +692,13 @@ class ApprovalStore:
                 "INSERT INTO kill_switch(key,enabled,updated_at,reason_code) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at, reason_code=excluded.reason_code",
                 ("payment_kill_switch", int(enabled), now.isoformat(), reason),
             )
-        self._event("kill_switch", actor_role=actor_role, action="kill_switch_enabled" if enabled else "kill_switch_disabled", reason_code=reason)
+            self._event(
+                "kill_switch",
+                actor_role=actor_role,
+                action="kill_switch_enabled" if enabled else "kill_switch_disabled",
+                reason_code=reason,
+                conn=conn,
+            )
         state = self.read_kill_switch()
         if self.telemetry_publisher is not None:
             self.telemetry_publisher.publish(

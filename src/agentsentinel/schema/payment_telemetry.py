@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Literal
 
-from pydantic import AwareDatetime, ConfigDict, Field, field_validator
+from pydantic import AwareDatetime, ConfigDict, Field, field_validator, model_validator
 
 from agentsentinel.payment_policy import Outcome
 from agentsentinel.schema.payment import PaymentAction, PaymentModel, _check_id
@@ -17,12 +18,15 @@ PaymentEventType = Literal[
     "POLICY_EVALUATED",
     "APPROVAL_REQUESTED",
     "APPROVAL_APPROVED",
+    "APPROVAL_GRANTED",
     "APPROVAL_REJECTED",
     "APPROVAL_EXPIRED",
     "PAYMENT_BLOCKED",
+    "PAYMENT_REJECTED",
     "PAYMENT_REVIEW_REQUIRED",
     "PAYMENT_DISPATCHED",
     "PAYMENT_COMPLETED",
+    "PAYMENT_FAILED",
     "PAYMENT_UNCERTAIN",
     "KILL_SWITCH_ENABLED",
     "KILL_SWITCH_DISABLED",
@@ -44,12 +48,15 @@ class PaymentTelemetryEvent(PaymentModel):
     payment_intent_id: str | None = None
     approval_id: str | None = None
     action: PaymentAction | None = None
+    amount_text: str | None = None
+    currency: Literal["USD", "EUR", "JPY"] | None = None
     event_type: PaymentEventType
     gateway_decision: Outcome | None = None
+    policy_version: str | None = None
     reason_codes: tuple[str, ...] = ()
     duration_ms: float | None = Field(default=None, ge=0)
     provider_outcome_category: Literal[
-        "not_started", "created", "captured", "completed", "uncertain", "blocked", "unknown"
+        "not_started", "created", "captured", "completed", "failed", "uncertain", "blocked", "unknown"
     ] | None = None
     anomaly_score: float | None = None
     detector_version: str | None = None
@@ -90,3 +97,30 @@ class PaymentTelemetryEvent(PaymentModel):
         if value is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value):
             raise ValueError("invalid detector version")
         return value
+
+    @field_validator("policy_version")
+    @classmethod
+    def bounded_policy_version(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", value):
+            raise ValueError("invalid policy version")
+        return value
+
+    @field_validator("amount_text")
+    @classmethod
+    def bounded_amount(cls, value: str | None) -> str | None:
+        if value is not None:
+            if len(value) > 12 or not re.fullmatch(r"(?:0|[1-9][0-9]{0,8})(?:\.[0-9]+)?", value):
+                raise ValueError("invalid telemetry amount")
+            amount = Decimal(value)
+            if not amount.is_finite() or amount <= 0 or -amount.as_tuple().exponent > 2:
+                raise ValueError("invalid telemetry amount")
+        return value
+
+    @model_validator(mode="after")
+    def amount_currency_pair(self) -> PaymentTelemetryEvent:
+        if (self.amount_text is None) != (self.currency is None):
+            raise ValueError("telemetry amount and currency must be supplied together")
+        if self.currency == "JPY" and self.amount_text is not None:
+            if Decimal(self.amount_text).as_tuple().exponent < 0:
+                raise ValueError("JPY telemetry amounts cannot have fractional digits")
+        return self

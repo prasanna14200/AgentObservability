@@ -108,6 +108,7 @@ class ToolResult:
     decision: Decision
     status: str
     reason_code: str
+    approval_id: str | None = None
 
 
 class LLMClient(Protocol):

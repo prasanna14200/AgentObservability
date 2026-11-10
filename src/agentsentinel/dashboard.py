@@ -202,7 +202,9 @@ def _read_outcome_counts(path: Path, since: str) -> dict[str, int] | None:
             """
             SELECT event_type, COUNT(*) AS count
             FROM payment_audit_chain
-            WHERE event_type IN ('PAYMENT_COMPLETED', 'PAYMENT_UNCERTAIN')
+            WHERE event_type IN (
+                'PAYMENT_COMPLETED', 'PAYMENT_FAILED', 'PAYMENT_UNCERTAIN', 'PAYMENT_REJECTED'
+            )
               AND CASE WHEN json_valid(canonical_event)
                        THEN json_extract(canonical_event, '$.timestamp') END >= ?
             GROUP BY event_type
@@ -314,11 +316,64 @@ def _read_trace_events(path: Path, trace_id: str) -> tuple[list[dict[str, Any]],
     return events, len(rows) > _MAX_TRACE_EVENTS
 
 
+def _read_operation_lifecycle(path: Path, operation_id: str) -> dict[str, str]:
+    unavailable = {
+        "operation_state": "Unavailable",
+        "dispatch_state": "Unavailable",
+        "reconciliation_state": "Unavailable",
+    }
+    if not operation_id or operation_id == "No data":
+        return {key: "No data" for key in unavailable}
+    try:
+        with _read_only(path) as conn:
+            if conn is None or not _has_table(conn, "operations"):
+                return {key: "No data" for key in unavailable}
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(operations)")}
+            if not {"operation_id", "state", "dispatch_state"} <= columns:
+                return {key: "No data" for key in unavailable}
+            row = conn.execute(
+                "SELECT state,dispatch_state FROM operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row is None:
+                return {key: "No data" for key in unavailable}
+            state = str(row["state"])
+            dispatch_state = str(row["dispatch_state"])
+            if state not in {
+                "RESERVED", "CLAIMED", "COMPLETED", "REJECTED",
+                "REVIEW_REQUIRED", "UNCERTAIN",
+            } or dispatch_state not in {"NOT_DISPATCHED", "MAY_HAVE_DISPATCHED"}:
+                return unavailable
+            reconciled = False
+            if _has_table(conn, "operation_events"):
+                reconciled = conn.execute(
+                    "SELECT 1 FROM operation_events WHERE operation_id=? "
+                    "AND event_type='verified_reconciliation' LIMIT 1",
+                    (operation_id,),
+                ).fetchone() is not None
+    except sqlite3.Error:
+        return unavailable
+
+    reconciliation_state = (
+        "VERIFIED" if reconciled
+        else "RECONCILIATION_REQUIRED" if state == "UNCERTAIN"
+        else "Not required"
+    )
+    return {
+        "operation_state": state,
+        "dispatch_state": dispatch_state,
+        "reconciliation_state": reconciliation_state,
+    }
+
+
 def _trace_summary(trace_id: str, events: list[dict[str, Any]]) -> dict[str, Any]:
     decisions = [event for event in events if event["event_type"] == "POLICY_EVALUATED"]
     outcomes = [
         event for event in events
-        if event["event_type"] in {"PAYMENT_COMPLETED", "PAYMENT_UNCERTAIN", "PAYMENT_BLOCKED"}
+        if event["event_type"] in {
+            "PAYMENT_COMPLETED", "PAYMENT_FAILED", "PAYMENT_UNCERTAIN",
+            "PAYMENT_BLOCKED", "PAYMENT_REJECTED"
+        }
     ]
     reason_codes = list(dict.fromkeys(
         reason for event in events for reason in event.get("reason_codes", [])
@@ -335,9 +390,29 @@ def _trace_summary(trace_id: str, events: list[dict[str, Any]]) -> dict[str, Any
     return {
         "trace_id": trace_id,
         "operation_id": next((event.get("operation_id") for event in events if event.get("operation_id")), "No data"),
+        "payment_intent_id": next(
+            (event.get("payment_intent_id") for event in events if event.get("payment_intent_id")),
+            "No data",
+        ),
+        "approval_id": next(
+            (event.get("approval_id") for event in reversed(events) if event.get("approval_id")),
+            "No data",
+        ),
+        "amount_text": next(
+            (event.get("amount_text") for event in events if event.get("amount_text")),
+            "No data",
+        ),
+        "currency": next(
+            (event.get("currency") for event in events if event.get("currency")),
+            "No data",
+        ),
         "event_timestamp": max((event["timestamp"] for event in events), default="No data"),
         "action": next((event.get("action") for event in reversed(events) if event.get("action")), "No data"),
         "decision": decisions[-1].get("gateway_decision") if decisions else "No data",
+        "policy_version": next(
+            (event.get("policy_version") for event in reversed(decisions) if event.get("policy_version")),
+            "No data",
+        ),
         "reason_codes": reason_codes,
         "provider_outcome": outcomes[-1]["event_type"].removeprefix("PAYMENT_") if outcomes else "No data",
         "anomaly_signal": advisory,
@@ -540,7 +615,12 @@ def _overview_context(
         value = None if decisions is None else decisions.get(decision, 0)
         metrics[f"decision_{decision.lower()}"] = _metric(value, "payment_audit_chain / POLICY_EVALUATED", time_range)
     outcomes = _read_outcome_counts(telemetry_db_path, since)
-    for event_type, key in (("PAYMENT_COMPLETED", "completed"), ("PAYMENT_UNCERTAIN", "uncertain")):
+    for event_type, key in (
+        ("PAYMENT_COMPLETED", "completed"),
+        ("PAYMENT_FAILED", "failed"),
+        ("PAYMENT_UNCERTAIN", "uncertain"),
+        ("PAYMENT_REJECTED", "rejected"),
+    ):
         metrics[key] = _metric(
             None if outcomes is None else outcomes.get(event_type, 0),
             "payment_audit_chain lifecycle events",
@@ -707,10 +787,12 @@ def create_dashboard_router(
         events, truncated = _read_trace_events(telemetry_db_path, trace_id)
         if not events:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="trace not found")
+        trace = _trace_summary(trace_id, events)
+        trace.update(_read_operation_lifecycle(payment_db_path, trace["operation_id"]))
         return _render(
             request,
             "dashboard_trace_detail.html",
-            {"role": role, "trace": _trace_summary(trace_id, events), "events": events, "truncated": truncated},
+            {"role": role, "trace": trace, "events": events, "truncated": truncated},
         )
 
     @router.get("/dashboard/alerts", response_class=HTMLResponse)
