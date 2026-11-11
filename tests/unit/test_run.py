@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -65,7 +66,7 @@ def test_server_environment_excludes_paypal_credentials_and_sets_local_source():
     assert "APPROVER_SECRET" in child
     assert len(child["APPROVER_SECRET"]) == len("new-secret-value" * 3)
     assert child["OTHER_SETTING"] == "preserved"
-    assert child["PYTHONPATH"].split(";")[0] == str(
-        Path(__file__).resolve().parents[2] / "src"
-    )
+    pythonpath_entries = child["PYTHONPATH"].split(os.pathsep)
+    assert pythonpath_entries[0] == str(Path(__file__).resolve().parents[2] / "src")
+    assert "existing-path" in pythonpath_entries[1:]
     assert not any(name.startswith("PAYPAL_") for name in child)

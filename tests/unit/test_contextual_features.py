@@ -209,22 +209,43 @@ def test_feature_manifest_contains_all_required_fields() -> None:
 
 
 def test_build_features_writes_parquet_and_manifest(tmp_path: Path) -> None:
-    import agentsentinel.features.contextual as ctx_module
+    traces = [
+        {
+            "trace_id": f"trace-{index}",
+            "agent_id": "agent-1",
+            "task_type": "lookup",
+            "events": [
+                {
+                    "event_id": f"event-{index}",
+                    "timestamp": f"2026-01-01T00:0{index}:00Z",
+                    "tool_name": "get_order",
+                    "latency_ms": 10 * (index + 1),
+                    "permissions": ["orders:read"],
+                }
+            ],
+        }
+        for index in range(5)
+    ]
+    input_rows = _make_trace_df(traces)
+    input_rows["label"] = "normal"
+    input_rows["anomaly_type"] = "__UNKNOWN__"
+    input_path = tmp_path / "input" / "traces.parquet"
+    input_path.parent.mkdir()
+    input_rows.to_parquet(input_path, index=False)
 
-    original_output = ctx_module.OUTPUT_DIR
-    try:
-        output = tmp_path / "features" / "v1"
-        ctx_module.OUTPUT_DIR = output
-        manifest = build_features(output_dir=output)
-        assert (output / "features.parquet").exists()
-        assert (output / "manifest.json").exists()
-        assert manifest["version"] == "v4"
-        assert manifest["row_count"] == 1831
-        assert len(manifest["features"]) == 18
-        assert manifest["train_traces"] == 496
-        assert manifest["test_traces"] == 124
-    finally:
-        ctx_module.OUTPUT_DIR = original_output
+    output = tmp_path / "features" / "v1"
+    manifest = build_features(output_dir=output, input_path=input_path)
+
+    output_rows = pd.read_parquet(output / "features.parquet")
+    saved_manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert len(output_rows) == 5
+    assert {feature["name"] for feature in FEATURE_MANIFEST}.issubset(output_rows.columns)
+    assert manifest["version"] == "v4"
+    assert manifest["row_count"] == 5
+    assert len(manifest["features"]) == 18
+    assert manifest["train_traces"] == 4
+    assert manifest["test_traces"] == 1
+    assert saved_manifest == manifest
 
 
 def test_no_model_training_or_rules_in_contextual_module() -> None:
