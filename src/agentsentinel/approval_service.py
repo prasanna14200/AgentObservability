@@ -7,7 +7,6 @@ import hmac
 import json
 import os
 import re
-import secrets
 import sqlite3
 from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timedelta, timezone
@@ -15,8 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import RedirectResponse
 from pydantic import AwareDatetime, field_validator
 
 from agentsentinel.observability.payment_events import (
@@ -67,6 +65,43 @@ def _http_reason_code(value: object, allowed: frozenset[str]) -> str:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid reason code") from None
 
 
+def _validate_request_fingerprint(value: object) -> str:
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError("request fingerprint must be a SHA-256 hex digest")
+    return value
+
+
+def _prefers_html(accept: str) -> bool:
+    qualities: dict[str, float] = {}
+    for media_range in accept.split(","):
+        parts = [part.strip() for part in media_range.split(";")]
+        media_type = parts[0].lower()
+        if media_type not in {"text/html", "application/json", "*/*"}:
+            continue
+        quality = 1.0
+        for parameter in parts[1:]:
+            name, separator, value = parameter.partition("=")
+            if separator and name.strip().lower() == "q":
+                try:
+                    quality = float(value.strip())
+                except ValueError:
+                    quality = 0.0
+                break
+        qualities[media_type] = max(qualities.get(media_type, 0.0), quality)
+    html_quality = qualities.get("text/html", 0.0)
+    return (
+        html_quality > 0
+        and html_quality > qualities.get("application/json", 0.0)
+        and html_quality > qualities.get("*/*", 0.0)
+    )
+
+
+def _effective_approval(record: "ApprovalRecord", now: datetime) -> "ApprovalRecord":
+    if record.status == "PENDING" and record.expires_at <= now:
+        return record.model_copy(update={"status": "EXPIRED"})
+    return record
+
+
 class ApprovalRecord(PaymentModel):
     approval_id: str
     operation_id: str
@@ -94,9 +129,7 @@ class ApprovalRecord(PaymentModel):
     @field_validator("request_fingerprint")
     @classmethod
     def valid_fingerprint(cls, value: str) -> str:
-        if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
-            raise ValueError("request fingerprint must be a SHA-256 hex digest")
-        return value
+        return _validate_request_fingerprint(value)
 
 
 class ApprovalEvent(PaymentModel):
@@ -510,7 +543,6 @@ class ApprovalStore:
         return intent, context
 
     def list_approvals(self, *, status: str | None = None) -> list[ApprovalRecord]:
-        self.expire_pending_approvals()
         with closing(self._connect()) as conn:
             if status is None:
                 rows = conn.execute("SELECT * FROM approvals ORDER BY created_at DESC").fetchall()
@@ -518,14 +550,21 @@ class ApprovalStore:
                 rows = conn.execute("SELECT * FROM approvals WHERE status=? ORDER BY created_at DESC", (status,)).fetchall()
         return [self._row_to_approval(row) for row in rows]
 
-    def expire_pending_approvals(self, *, now: datetime | None = None) -> list[ApprovalRecord]:
+    def expire_pending_approvals(
+        self,
+        *,
+        now: datetime | None = None,
+        approval_id: str | None = None,
+    ) -> list[ApprovalRecord]:
         now = now or self._now()
         expired: list[ApprovalRecord] = []
         with self._write() as conn:
-            rows = conn.execute(
-                "SELECT * FROM approvals WHERE status='PENDING' AND expires_at <= ?",
-                (now.isoformat(),),
-            ).fetchall()
+            query = "SELECT * FROM approvals WHERE status='PENDING' AND expires_at <= ?"
+            parameters: tuple[str, ...] = (now.isoformat(),)
+            if approval_id is not None:
+                query += " AND approval_id=?"
+                parameters += (approval_id,)
+            rows = conn.execute(query, parameters).fetchall()
             for row in rows:
                 record = self._row_to_approval(row)
                 conn.execute(
@@ -542,6 +581,14 @@ class ApprovalStore:
 
     def reject_approval(self, approval_id: str, *, actor_role: str = "approver", reason_code: str = "HUMAN_REJECTED") -> ApprovalRecord:
         reason_code = _validate_reason_code(reason_code, APPROVAL_REASON_CODES - {"APPROVED"})
+        if self.get_approval(approval_id) is None:
+            raise ValueError("unknown approval")
+        expired = self.expire_pending_approvals(
+            now=self._now(),
+            approval_id=approval_id,
+        )
+        if expired:
+            raise ValueError("approval expired")
         with self._write() as conn:
             row = conn.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
             if row is None:
@@ -577,12 +624,18 @@ class ApprovalStore:
         approval_id: str,
         *,
         actor_role: str = "approver",
-        request_fingerprint: str | None = None,
+        request_fingerprint: str,
         reason_code: str = "APPROVED",
     ) -> ApprovalRecord:
+        request_fingerprint = _validate_request_fingerprint(request_fingerprint)
         reason_code = _validate_reason_code(reason_code, frozenset({"APPROVED"}))
         now = self._now()
-        expired = self.expire_pending_approvals(now=now)
+        pending = self.get_approval(approval_id)
+        if pending is None:
+            raise ValueError("unknown approval")
+        if not hmac.compare_digest(request_fingerprint, pending.request_fingerprint):
+            raise ValueError("approval request fingerprint mismatch")
+        expired = self.expire_pending_approvals(now=now, approval_id=approval_id)
         if any(record.approval_id == approval_id for record in expired):
             raise ValueError("approval expired")
         with self._write() as conn:
@@ -592,7 +645,7 @@ class ApprovalStore:
             if row is None:
                 raise ValueError("unknown approval")
             record = self._row_to_approval(row)
-            if request_fingerprint is not None and request_fingerprint != record.request_fingerprint:
+            if not hmac.compare_digest(request_fingerprint, record.request_fingerprint):
                 raise ValueError("approval request fingerprint mismatch")
             if record.status == "APPROVED":
                 return record
@@ -815,7 +868,6 @@ def create_app(
     store = ApprovalStore(db_path, ttl_seconds=ttl_seconds)
     app = FastAPI(title="AgentSentinel approval service", docs_url="/docs", redoc_url=None)
     app.state.approval_store = store
-    templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
     from fastapi.staticfiles import StaticFiles
 
     from agentsentinel.dashboard import create_dashboard_router
@@ -842,8 +894,9 @@ def create_app(
     @app.get("/ready")
     def readiness() -> dict[str, str]:
         try:
+            _require_approver_secret(approver_secret)
             store.read_kill_switch()
-        except (OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        except (HTTPException, OSError, RuntimeError, sqlite3.Error, TypeError, ValueError):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="service not ready",
@@ -852,17 +905,16 @@ def create_app(
 
     @app.get("/approvals")
     async def approvals(request: Request, status: str | None = None) -> Any:
-        _require_bearer(request, approver_secret)
-        records = store.list_approvals(status=status)
-        if "text/html" in request.headers.get("accept", ""):
-            csrf = secrets.token_urlsafe(32)
-            response = templates.TemplateResponse(
-                "approvals.html",
-                {"request": request, "items": [record.model_dump(mode="python") for record in records], "status": status or "ALL"},
-                headers={"X-CSRF-Token": csrf},
+        if _prefers_html(request.headers.get("accept", "")):
+            return RedirectResponse(
+                "/dashboard/approvals",
+                status_code=303,
             )
-            response.set_cookie("csrf_token", csrf, httponly=True, samesite="lax", secure=False)
-            return response
+        _require_bearer(request, approver_secret)
+        now = store._now()
+        records = [_effective_approval(record, now) for record in store.list_approvals()]
+        if status is not None:
+            records = [record for record in records if record.status == status]
         return [item.model_dump(mode="json") for item in records]
 
     @app.get("/approvals/{approval_id}")
@@ -871,7 +923,7 @@ def create_app(
         record = store.get_approval(approval_id)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="approval not found")
-        return record.model_dump(mode="json")
+        return _effective_approval(record, store._now()).model_dump(mode="json")
 
     @app.post("/approvals/{approval_id}/approve")
     async def approve(request: Request, approval_id: str) -> dict[str, Any]:
@@ -880,7 +932,23 @@ def create_app(
         if store.is_kill_switch_active():
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="kill switch active")
         payload = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-        fingerprint = payload.get("request_fingerprint")
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid request")
+        try:
+            fingerprint = _validate_request_fingerprint(payload.get("request_fingerprint"))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="approval fingerprint mismatch",
+            ) from None
+        pending = store.get_approval(approval_id)
+        if pending is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="approval not found")
+        if not hmac.compare_digest(fingerprint, pending.request_fingerprint):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="approval fingerprint mismatch",
+            )
         record = store.approve_approval(approval_id, actor_role="approver", request_fingerprint=fingerprint, reason_code="APPROVED")
         return record.model_dump(mode="json")
 
@@ -895,7 +963,19 @@ def create_app(
             payload.get("reason_code", "HUMAN_REJECTED"),
             APPROVAL_REASON_CODES - {"APPROVED"},
         )
-        record = store.reject_approval(approval_id, actor_role="approver", reason_code=reason)
+        try:
+            record = store.reject_approval(
+                approval_id,
+                actor_role="approver",
+                reason_code=reason,
+            )
+        except ValueError as error:
+            if str(error) != "approval expired":
+                raise
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="approval expired",
+            ) from None
         return record.model_dump(mode="json")
 
     @app.get("/killswitch")

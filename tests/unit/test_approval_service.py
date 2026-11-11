@@ -52,6 +52,261 @@ def test_approval_store_approve_reject_and_expire(tmp_path):
     )
     store.expire_pending_approvals()
     assert store.get_approval(expired.approval_id).status == "EXPIRED"
+    assert [
+        event.action
+        for event in store.list_events(approval_id=expired.approval_id)
+    ].count("approval_expired") == 1
+
+    expired_on_approval = store.create_approval(
+        intent=make_intent(operation_id="op_approval_expire_on_approve"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=1),
+    )
+    with pytest.raises(ValueError, match="approval expired"):
+        store.approve_approval(
+            expired_on_approval.approval_id,
+            request_fingerprint=expired_on_approval.request_fingerprint,
+        )
+    assert store.get_approval(expired_on_approval.approval_id).status == "EXPIRED"
+
+
+def test_approval_reads_report_effective_expiry_without_persisting_it(tmp_path):
+    secret = "read-only-approval-test-secret-0001"
+    app = create_app(
+        db_path=tmp_path / "approval_read_only.sqlite",
+        approver_secret=secret,
+    )
+    store = app.state.approval_store
+    records = [
+        store.create_approval(
+            intent=make_intent(f"op_read_expired_{index}"),
+            context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+            expires_at=NOW - timedelta(minutes=index + 1),
+        )
+        for index in range(2)
+    ]
+    events_before = store.list_events()
+
+    assert [record.status for record in store.list_approvals()] == ["PENDING", "PENDING"]
+
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {secret}"}
+    listed = client.get("/approvals", headers=headers)
+    filtered_pending = client.get("/approvals?status=PENDING", headers=headers)
+    filtered_expired = client.get("/approvals?status=EXPIRED", headers=headers)
+    detailed = client.get(f"/approvals/{records[0].approval_id}", headers=headers)
+    audit = client.get("/audit", headers=headers)
+    kill_switch = client.get("/killswitch", headers=headers)
+
+    assert listed.status_code == filtered_pending.status_code == filtered_expired.status_code == 200
+    assert audit.status_code == kill_switch.status_code == 200
+    assert [item["status"] for item in listed.json()] == ["EXPIRED", "EXPIRED"]
+    assert filtered_pending.json() == []
+    assert {
+        item["approval_id"] for item in filtered_expired.json()
+    } == {record.approval_id for record in records}
+    assert detailed.status_code == 200
+    assert detailed.json()["status"] == "EXPIRED"
+    assert store.list_events() == events_before
+    assert [store.get_approval(record.approval_id).status for record in records] == [
+        "PENDING",
+        "PENDING",
+    ]
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approvals WHERE status='PENDING'"
+        ).fetchone()[0] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_events WHERE action='approval_expired'"
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("accept", "expected_status"),
+    [
+        pytest.param(None, 200, id="missing-accept"),
+        pytest.param("*/*", 200, id="wildcard-accept"),
+        pytest.param("application/json", 200, id="json-only"),
+        pytest.param("application/json, text/html", 200, id="ambiguous-equal"),
+        pytest.param("text/html, application/json;q=0.9", 303, id="html-preferred"),
+        pytest.param("text/html", 303, id="html-only"),
+    ],
+)
+def test_approvals_route_preserves_json_clients_and_redirects_html(
+    tmp_path, accept, expected_status
+):
+    secret = "html-redirect-approval-test-secret"
+    app = create_app(
+        db_path=tmp_path / "approval_content_negotiation.sqlite",
+        approver_secret=secret,
+    )
+    client = TestClient(app)
+    if accept is None:
+        client.headers.pop("accept", None)
+        request_headers = {"Authorization": f"Bearer {secret}"}
+    else:
+        request_headers = {
+            "Accept": accept,
+            "Authorization": f"Bearer {secret}",
+        }
+
+    response = client.get(
+        "/approvals",
+        headers=request_headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == expected_status
+    if expected_status == 303:
+        assert response.headers["location"] == "/dashboard/approvals"
+        assert "Pending approvals" not in response.text
+    else:
+        assert isinstance(response.json(), list)
+
+
+def test_approvals_route_redirects_unauthenticated_html_but_rejects_json(tmp_path):
+    app = create_app(
+        db_path=tmp_path / "approval_unauthenticated_content.sqlite",
+        approver_secret="unauthenticated-approval-test-secret",
+    )
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent("op_unauthenticated_html_redirect"),
+        context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+        expires_at=NOW - timedelta(minutes=1),
+    )
+    events_before = store.list_events()
+    client = TestClient(app)
+
+    html = client.get("/approvals", headers={"Accept": "text/html"}, follow_redirects=False)
+    json_response = client.get("/approvals", headers={"Accept": "application/json"})
+    dashboard = client.get("/dashboard/approvals", follow_redirects=False)
+
+    assert html.status_code == 303
+    assert html.headers["location"] == "/dashboard/approvals"
+    assert json_response.status_code == 401
+    assert dashboard.status_code == 303
+    assert dashboard.headers["location"] == "/dashboard/login"
+    assert store.get_approval(record.approval_id).status == "PENDING"
+    assert store.list_events() == events_before
+
+
+def test_wrong_fingerprint_does_not_expire_target_or_other_pending_approvals(tmp_path):
+    store = ApprovalStore(tmp_path / "approval_wrong_fingerprint.sqlite", clock=lambda: NOW)
+    context = AuthenticatedScope(principal_id="principal_001", scope_id="scope_001")
+    target = store.create_approval(
+        intent=make_intent("op_approval_expired_target"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=2),
+    )
+    unrelated = store.create_approval(
+        intent=make_intent("op_approval_expired_unrelated"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=1),
+    )
+    events_before = store.list_events()
+    wrong_fingerprint = (
+        "0" * 64
+        if target.request_fingerprint != "0" * 64
+        else "1" * 64
+    )
+
+    with pytest.raises(ValueError, match="approval request fingerprint mismatch"):
+        store.approve_approval(
+            target.approval_id,
+            request_fingerprint=wrong_fingerprint,
+        )
+
+    assert store.get_approval(target.approval_id).status == "PENDING"
+    assert store.get_approval(unrelated.approval_id).status == "PENDING"
+    assert store.list_events() == events_before
+    assert all(
+        event.action != "approval_approved"
+        for event in store.list_events(approval_id=target.approval_id)
+    )
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM authorizations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_expiry_write_processes_only_target_approval(tmp_path, decision):
+    store = ApprovalStore(
+        tmp_path / f"target_expiry_{decision}.sqlite",
+        clock=lambda: NOW,
+    )
+    context = AuthenticatedScope(principal_id="principal_001", scope_id="scope_001")
+    target = store.create_approval(
+        intent=make_intent(f"op_target_expiry_{decision}"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=2),
+    )
+    unrelated = store.create_approval(
+        intent=make_intent(f"op_unrelated_expiry_{decision}"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=1),
+    )
+
+    with pytest.raises(ValueError, match="approval expired"):
+        if decision == "approve":
+            store.approve_approval(
+                target.approval_id,
+                request_fingerprint=target.request_fingerprint,
+            )
+        else:
+            store.reject_approval(target.approval_id)
+
+    assert store.get_approval(target.approval_id).status == "EXPIRED"
+    assert store.get_approval(unrelated.approval_id).status == "PENDING"
+    target_events = store.list_events(approval_id=target.approval_id)
+    assert [event.action for event in target_events].count("approval_expired") == 1
+    assert all(event.action != "approval_approved" for event in target_events)
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (target.operation_id,),
+        ).fetchone()[0] == 0
+
+
+def test_reject_api_persists_only_target_expiry(tmp_path):
+    secret = "expired-rejection-api-test-secret"
+    app = create_app(
+        db_path=tmp_path / "expired_rejection_api.sqlite",
+        approver_secret=secret,
+    )
+    store = app.state.approval_store
+    context = AuthenticatedScope(principal_id="principal_001", scope_id="scope_001")
+    target = store.create_approval(
+        intent=make_intent("op_api_expired_reject_target"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=2),
+    )
+    unrelated = store.create_approval(
+        intent=make_intent("op_api_expired_reject_unrelated"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=1),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        f"/approvals/{target.approval_id}/reject",
+        json={"reason_code": "HUMAN_REJECTED"},
+        headers={
+            "Authorization": f"Bearer {secret}",
+            "X-CSRF-Token": "csrf-token",
+            "Cookie": "csrf_token=csrf-token",
+        },
+    )
+
+    assert response.status_code == 409
+    assert store.get_approval(target.approval_id).status == "EXPIRED"
+    assert store.get_approval(unrelated.approval_id).status == "PENDING"
+    assert [
+        event.action for event in store.list_events(approval_id=target.approval_id)
+    ].count("approval_expired") == 1
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authorizations"
+        ).fetchone()[0] == 0
 
 
 def test_fastapi_service_requires_bearer_auth_and_kill_switch_state(tmp_path, monkeypatch):
@@ -105,6 +360,38 @@ def test_readiness_fails_when_persisted_kill_switch_state_is_unavailable(tmp_pat
     assert response.status_code == 503
     assert response.json() == {"detail": "service not ready"}
     assert client.get("/health").status_code == 200
+
+
+@pytest.mark.parametrize("approver_secret", [None, "too-short"])
+def test_readiness_requires_valid_dashboard_approver_configuration(
+    tmp_path, monkeypatch, approver_secret
+):
+    monkeypatch.delenv("APPROVER_SECRET", raising=False)
+    app = create_app(
+        db_path=tmp_path / "readiness_auth.sqlite",
+        approver_secret=approver_secret,
+    )
+    client = TestClient(app)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "service not ready"}
+    assert approver_secret is None or approver_secret not in response.text
+    assert client.get("/health").status_code == 200
+
+
+def test_readiness_accepts_valid_dashboard_approver_configuration(tmp_path, monkeypatch):
+    monkeypatch.delenv("APPROVER_SECRET", raising=False)
+    app = create_app(
+        db_path=tmp_path / "readiness_auth_valid.sqlite",
+        approver_secret="valid-readiness-secret-" + "x" * 32,
+    )
+
+    response = TestClient(app).get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
 
 
 def test_approval_store_issuance_is_atomic_under_concurrency(tmp_path):
@@ -166,7 +453,10 @@ def test_approval_creation_and_issuance_audit_are_transactional(tmp_path):
             BEGIN SELECT RAISE(ABORT, 'test audit failure'); END"""
         )
     with pytest.raises(sqlite3.IntegrityError):
-        store.approve_approval(pending.approval_id)
+        store.approve_approval(
+            pending.approval_id,
+            request_fingerprint=pending.request_fingerprint,
+        )
     assert store.get_approval(pending.approval_id).status == "PENDING"
     with sqlite3.connect(db) as conn:
         assert conn.execute(
@@ -197,6 +487,175 @@ def test_approval_api_requires_matching_csrf_token(tmp_path):
 
     assert missing.status_code == mismatched.status_code == 403
     assert store.get_approval(record.approval_id).status == "PENDING"
+
+
+@pytest.mark.parametrize(
+    ("csrf_headers", "csrf_cookie"),
+    [
+        pytest.param({}, "valid-csrf", id="missing-header"),
+        pytest.param({"X-CSRF-Token": "valid-csrf"}, None, id="missing-cookie"),
+        pytest.param(
+            {"X-CSRF-Token": "header-token"},
+            "cookie-token",
+            id="mismatched-header-and-cookie",
+        ),
+    ],
+)
+def test_approval_api_rejects_invalid_csrf_without_mutation(
+    tmp_path, csrf_headers, csrf_cookie
+):
+    approver_secret = "a" * 40
+    app = create_app(
+        db_path=tmp_path / "approval_csrf_api.sqlite",
+        approver_secret=approver_secret,
+    )
+    client = TestClient(app)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent(),
+        context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+    )
+    events_before = store.list_events()
+    headers = {"Authorization": f"Bearer {approver_secret}", **csrf_headers}
+    if csrf_cookie is not None:
+        headers["Cookie"] = f"csrf_token={csrf_cookie}"
+
+    response = client.post(
+        f"/approvals/{record.approval_id}/approve",
+        json={"request_fingerprint": record.request_fingerprint},
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+    assert store.get_approval(record.approval_id).status == "PENDING"
+    assert store.list_events() == events_before
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (record.operation_id,),
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("csrf_headers", "csrf_cookie"),
+    [
+        pytest.param({}, "valid-csrf", id="missing-header"),
+        pytest.param({"X-CSRF-Token": "valid-csrf"}, None, id="missing-cookie"),
+        pytest.param(
+            {"X-CSRF-Token": "header-token"},
+            "cookie-token",
+            id="mismatched-header-and-cookie",
+        ),
+    ],
+)
+def test_kill_switch_api_rejects_invalid_csrf_without_mutation(
+    tmp_path, csrf_headers, csrf_cookie
+):
+    approver_secret = "b" * 40
+    app = create_app(
+        db_path=tmp_path / "killswitch_csrf_api.sqlite",
+        approver_secret=approver_secret,
+    )
+    client = TestClient(app)
+    store = app.state.approval_store
+    state_before = store.read_kill_switch()
+    events_before = store.list_events()
+    headers = {"Authorization": f"Bearer {approver_secret}", **csrf_headers}
+    if csrf_cookie is not None:
+        headers["Cookie"] = f"csrf_token={csrf_cookie}"
+
+    response = client.post(
+        "/killswitch",
+        json={"enabled": True, "reason_code": "KILL_SWITCH_ENABLED"},
+        headers=headers,
+    )
+
+    assert response.status_code == 403
+    assert store.read_kill_switch() == state_before
+    assert store.list_events() == events_before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({}, id="missing"),
+        pytest.param({"request_fingerprint": None}, id="null"),
+        pytest.param({"request_fingerprint": ""}, id="empty"),
+        pytest.param({"request_fingerprint": "   "}, id="whitespace-only"),
+        pytest.param({"request_fingerprint": "g" * 64}, id="malformed"),
+        pytest.param({"request_fingerprint": "0" * 64}, id="incorrect"),
+    ],
+)
+def test_approval_api_rejects_invalid_request_fingerprint_without_mutation(
+    tmp_path, payload
+):
+    approver_secret = "f" * 40
+    app = create_app(
+        db_path=tmp_path / "approval_fingerprint.sqlite",
+        approver_secret=approver_secret,
+    )
+    client = TestClient(app)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent(),
+        context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+    )
+    events_before = store.list_events()
+
+    response = client.post(
+        f"/approvals/{record.approval_id}/approve",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {approver_secret}",
+            "X-CSRF-Token": "csrf-token",
+            "Cookie": "csrf_token=csrf-token",
+        },
+    )
+
+    assert response.status_code == 409
+    assert store.get_approval(record.approval_id).status == "PENDING"
+    assert store.list_events() == events_before
+    assert all(event.action != "approval_approved" for event in store.list_events())
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (record.operation_id,),
+        ).fetchone()[0] == 0
+
+
+def test_approval_api_accepts_matching_request_fingerprint(tmp_path):
+    approver_secret = "g" * 40
+    app = create_app(
+        db_path=tmp_path / "approval_fingerprint_valid.sqlite",
+        approver_secret=approver_secret,
+    )
+    client = TestClient(app)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent(),
+        context=AuthenticatedScope(principal_id="principal_001", scope_id="scope_001"),
+    )
+
+    response = client.post(
+        f"/approvals/{record.approval_id}/approve",
+        json={"request_fingerprint": record.request_fingerprint},
+        headers={
+            "Authorization": f"Bearer {approver_secret}",
+            "X-CSRF-Token": "csrf-token",
+            "Cookie": "csrf_token=csrf-token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert store.get_approval(record.approval_id).status == "APPROVED"
+    assert [event.action for event in store.list_events(approval_id=record.approval_id)].count(
+        "approval_approved"
+    ) == 1
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (record.operation_id,),
+        ).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize(

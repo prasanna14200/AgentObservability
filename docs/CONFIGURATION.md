@@ -23,10 +23,14 @@ obtains tokens from its configured Sandbox credentials. `run.py` removes
 PayPal-related variables from the dashboard child process. It never prints
 the approver secret. The service listens only on `127.0.0.1:8000`.
 
-The service provides `/health` as a process liveness response and `/ready` as
-a local readiness check that verifies the persisted kill-switch row can be
-read. `/ready` does not validate telemetry, PayPal connectivity, or a hosted
-database, and is not sufficient production readiness evidence.
+The service provides `/health` as a process liveness response. `/ready`
+returns `200 {"status":"ready"}` only when the approval-store kill-switch row
+is readable and a dashboard approver secret is configured with at least 32
+characters; otherwise it returns `503 {"detail":"service not ready"}`. The
+response does not expose authentication configuration details. A viewer
+secret is optional and is not part of readiness. `/ready` does not validate
+telemetry, PayPal connectivity, or a hosted database, and is not sufficient
+production readiness evidence.
 
 ## Safe local use
 

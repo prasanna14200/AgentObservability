@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import re
 import sqlite3
@@ -11,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentsentinel.approval_service import create_app
+from agentsentinel import dashboard as dashboard_module
 from agentsentinel.observability.payment_audit import PaymentAuditChain
 from agentsentinel.observability.payment_events import build_payment_event
 from agentsentinel.payment_policy import AuthenticatedScope
@@ -45,6 +49,12 @@ def sign_in(client: TestClient, credential: str = APPROVER_SECRET) -> str:
     assert response.status_code == 303
     assert client.cookies.get("agentsentinel_session")
     return client.cookies.get("csrf_token") or token
+
+
+def _signed_session(payload: str, secret: str) -> str:
+    encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
+    signature = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{encoded}.{signature}"
 
 
 def append_trace(
@@ -90,6 +100,256 @@ def test_unauthenticated_dashboard_access_is_rejected(tmp_path):
     assert client.get("/dashboard").status_code == 401
     assert client.get("/dashboard/traces").status_code == 401
     assert client.get("/approvals").status_code == 401
+
+
+def test_dashboard_operator_login_sets_role_and_local_cookie_attributes(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    login = client.get("/dashboard/login")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+
+    response = client.post(
+        "/dashboard/login",
+        data={"csrf_token": csrf, "credential": APPROVER_SECRET},
+        follow_redirects=False,
+    )
+    cookie_headers = response.headers.get_list("set-cookie")
+    session_cookie = next(value for value in cookie_headers if value.startswith("agentsentinel_session="))
+    csrf_cookie = next(value for value in cookie_headers if value.startswith("csrf_token="))
+
+    assert response.status_code == 303
+    assert "HttpOnly" in session_cookie
+    assert "SameSite=strict" in session_cookie
+    assert "Max-Age=3600" in session_cookie
+    assert "Secure" not in session_cookie
+    assert "HttpOnly" in csrf_cookie
+    assert "SameSite=strict" in csrf_cookie
+    assert "Secure" not in csrf_cookie
+    dashboard = client.get("/dashboard")
+    assert dashboard.status_code == 200
+    assert "Sign out (approver)" in dashboard.text
+    assert APPROVER_SECRET not in response.text + dashboard.text
+
+
+@pytest.mark.parametrize("invalid_secret", [None, "too-short"])
+def test_dashboard_login_returns_unavailable_without_valid_approver_configuration(
+    tmp_path, monkeypatch, invalid_secret
+):
+    monkeypatch.delenv("APPROVER_SECRET", raising=False)
+    app = create_app(
+        db_path=tmp_path / "application.sqlite",
+        approver_secret=invalid_secret,
+        viewer_secret=VIEWER_SECRET,
+    )
+    client = TestClient(app)
+    login = client.get("/dashboard/login")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+
+    response = client.post(
+        "/dashboard/login",
+        data={"csrf_token": csrf, "credential": VIEWER_SECRET},
+    )
+
+    assert response.status_code == 503
+    assert "Authentication failed" not in response.text
+    assert APPROVER_SECRET not in response.text
+    assert VIEWER_SECRET not in response.text
+
+
+def test_login_rejects_missing_and_mismatched_csrf_tokens(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    login = client.get("/dashboard/login")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+
+    missing = client.post("/dashboard/login", data={"credential": APPROVER_SECRET})
+    client.cookies.clear()
+    client.cookies.set("csrf_token", "different-token")
+    mismatched = client.post(
+        "/dashboard/login",
+        data={"csrf_token": csrf, "credential": APPROVER_SECRET},
+    )
+
+    assert missing.status_code == 403
+    assert mismatched.status_code == 403
+    assert client.cookies.get("agentsentinel_session") is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "v1|administrator|9999999999|nonce",
+        "v1|approver|not-a-timestamp|nonce",
+        "malformed-payload",
+    ],
+)
+def test_dashboard_rejects_invalid_role_or_malformed_signed_session(tmp_path, payload):
+    client = TestClient(make_app(tmp_path))
+    client.cookies.set("agentsentinel_session", _signed_session(payload, APPROVER_SECRET))
+
+    assert client.get("/dashboard").status_code == 401
+
+
+def test_dashboard_rejects_tampered_expired_and_wrong_secret_sessions(tmp_path, monkeypatch):
+    client = TestClient(make_app(tmp_path))
+    valid_token = _signed_session("v1|approver|9999999999|nonce", APPROVER_SECRET)
+    client.cookies.set("agentsentinel_session", valid_token)
+    assert client.get("/dashboard").status_code == 200
+
+    signature = valid_token.rsplit(".", 1)[1]
+    client.cookies.set("agentsentinel_session", f"{valid_token.rsplit('.', 1)[0]}.{signature[:-1]}{'0' if signature[-1] != '0' else '1'}")
+    assert client.get("/dashboard").status_code == 401
+
+    monkeypatch.setattr(dashboard_module.time, "time", lambda: 1000)
+    expired_token = dashboard_module._sign_session("approver", APPROVER_SECRET)
+    monkeypatch.setattr(dashboard_module.time, "time", lambda: 4600)
+    client.cookies.set("agentsentinel_session", expired_token)
+    assert client.get("/dashboard").status_code == 401
+
+    client.cookies.set("agentsentinel_session", _signed_session("v1|approver|9999999999|nonce", "x" * 40))
+    assert client.get("/dashboard").status_code == 401
+
+
+def test_viewer_can_read_dashboard_pages_but_not_operator_mutations(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    csrf = sign_in(client, VIEWER_SECRET)
+    store = app.state.approval_store
+    context = AuthenticatedScope(principal_id="viewer_test", scope_id="dashboard_scope")
+    record = store.create_approval(intent=make_intent("viewer_mutation"), context=context)
+
+    for path in ("/dashboard", "/dashboard/traces", "/dashboard/alerts", "/dashboard/approvals"):
+        response = client.get(path)
+        assert response.status_code == 200
+    assert "Sign out (viewer)" in client.get("/dashboard").text
+
+    approval = client.post(
+        f"/dashboard/approvals/{record.approval_id}/approve",
+        data={
+            "csrf_token": csrf,
+            "request_fingerprint": record.request_fingerprint,
+            "confirm": "yes",
+        },
+    )
+    kill_switch = client.post(
+        "/dashboard/killswitch",
+        data={"csrf_token": csrf, "enabled": "true", "confirm": "yes"},
+    )
+    audit_verify = client.post(
+        "/dashboard/audit/verify",
+        data={"csrf_token": csrf, "confirm": "yes"},
+    )
+
+    assert approval.status_code == kill_switch.status_code == audit_verify.status_code == 403
+    assert store.get_approval(record.approval_id).status == "PENDING"
+    assert store.read_kill_switch().enabled is False
+
+
+def test_authenticated_mutation_with_missing_or_mismatched_csrf_does_not_change_state(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    sign_in(client)
+
+    missing = client.post(
+        "/dashboard/killswitch",
+        data={"enabled": "true", "confirm": "yes"},
+    )
+    mismatched = client.post(
+        "/dashboard/killswitch",
+        data={"csrf_token": "incorrect", "enabled": "true", "confirm": "yes"},
+    )
+
+    assert missing.status_code == mismatched.status_code == 403
+    assert client.app.state.approval_store.read_kill_switch().enabled is False
+
+
+def test_dashboard_get_pages_do_not_persist_approval_expiry(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    sign_in(client)
+    store = app.state.approval_store
+    record = store.create_approval(
+        intent=make_intent("dashboard_read_expired"),
+        context=AuthenticatedScope(
+            principal_id="dashboard_read_principal",
+            scope_id="dashboard_scope",
+        ),
+        expires_at=NOW - timedelta(seconds=1),
+    )
+    events_before = store.list_events()
+
+    responses = [
+        client.get(path)
+        for path in (
+            "/dashboard",
+            "/dashboard/traces",
+            "/dashboard/traces/trace_read_expired",
+            "/dashboard/alerts",
+            "/dashboard/approvals",
+            "/dashboard/demo",
+        )
+    ]
+
+    assert all(response.status_code == 200 for response in responses)
+    queue = responses[4]
+    assert record.approval_id in queue.text
+    assert "EXPIRED" in queue.text
+    assert store.get_approval(record.approval_id).status == "PENDING"
+    assert store.list_events() == events_before
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT status FROM approvals WHERE approval_id=?",
+            (record.approval_id,),
+        ).fetchone()[0] == "PENDING"
+        assert connection.execute(
+            "SELECT COUNT(*) FROM approval_events WHERE action='approval_expired'"
+        ).fetchone()[0] == 0
+
+
+def test_dashboard_expiry_action_changes_only_the_target_approval(tmp_path):
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    csrf = sign_in(client)
+    store = app.state.approval_store
+    context = AuthenticatedScope(
+        principal_id="dashboard_expiry_principal",
+        scope_id="dashboard_scope",
+    )
+    target = store.create_approval(
+        intent=make_intent("dashboard_expired_target"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=2),
+    )
+    unrelated = store.create_approval(
+        intent=make_intent("dashboard_expired_unrelated"),
+        context=context,
+        expires_at=NOW - timedelta(minutes=1),
+    )
+    events_before = store.list_events()
+
+    response = client.post(
+        f"/dashboard/approvals/{target.approval_id}/approve",
+        data={
+            "csrf_token": csrf,
+            "request_fingerprint": target.request_fingerprint,
+            "confirm": "yes",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 409
+    assert store.get_approval(target.approval_id).status == "EXPIRED"
+    assert store.get_approval(unrelated.approval_id).status == "PENDING"
+    assert store.list_events() != events_before
+    assert [
+        event.action for event in store.list_events(approval_id=target.approval_id)
+    ].count("approval_expired") == 1
+    assert all(
+        event.action != "approval_expired"
+        for event in store.list_events(approval_id=unrelated.approval_id)
+    )
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM authorizations WHERE operation_id=?",
+            (target.operation_id,),
+        ).fetchone()[0] == 0
 
 
 def test_authenticated_read_only_overview_shows_sources_and_ranges(tmp_path):
@@ -652,7 +912,10 @@ def test_dashboard_login_rejects_invalid_credentials_without_reflection(tmp_path
     )
 
     assert rejected.status_code == 401
+    assert "Authentication failed." in rejected.text
     assert credential not in rejected.text
+    assert APPROVER_SECRET not in rejected.text
+    assert VIEWER_SECRET not in rejected.text
     assert client.get("/dashboard").status_code == 401
 
 

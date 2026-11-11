@@ -971,8 +971,13 @@ def create_dashboard_router(
         )
 
     @router.get("/dashboard/approvals", response_class=HTMLResponse)
-    async def dashboard_approvals(request: Request) -> HTMLResponse:
-        role = authenticated_role(request)
+    async def dashboard_approvals(request: Request) -> Response:
+        try:
+            role = authenticated_role(request)
+        except HTTPException as error:
+            if error.status_code != status.HTTP_401_UNAUTHORIZED:
+                raise
+            return RedirectResponse("/dashboard/login", status_code=status.HTTP_303_SEE_OTHER)
         now = datetime.now(timezone.utc)
         items = _read_approval_rows(payment_db_path, now)
         return _render(
@@ -1003,7 +1008,7 @@ def create_dashboard_router(
         if record.status != "PENDING":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="approval is not pending")
         if record.expires_at <= now:
-            store.expire_pending_approvals(now=now)
+            store.expire_pending_approvals(now=now, approval_id=approval_id)
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="approval expired")
         if decision == "approve":
             if kill_switch.enabled:

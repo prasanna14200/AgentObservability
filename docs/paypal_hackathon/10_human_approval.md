@@ -32,6 +32,26 @@ Approved, rejected, and expired states are terminal for the approval record unle
 - Authorization issuance is atomic with the approval transition and can only happen in the trusted application path.
 - The gateway rechecks policy and kill-switch state before dispatch.
 
+## Operator interfaces and expiry reads
+
+The supported browser approval queue is `/dashboard/approvals`, which uses
+the dashboard's signed browser session and operator-role checks. The legacy
+`/approvals` HTML representation is retired: requests that prefer `text/html`
+over JSON receive a `303` redirect to `/dashboard/approvals`. Requests with no
+`Accept` header, `*/*`, or equal preference for HTML and JSON continue to use
+the JSON API and its bearer authentication. JSON approval clients continue to
+use `/approvals/{approval_id}/approve` and
+`/approvals/{approval_id}/reject`.
+
+GET/read operations do not persist expiry transitions or create approval
+expiry audit events. Approval list and detail responses present an overdue
+pending record as effectively `EXPIRED`; the persisted record remains
+`PENDING` until a write path or explicit expiry processing records the
+transition. The stored status and audit trail are authoritative for whether
+the expiry transition has been persisted. Approval/rejection writes process
+expiry only for their target record, and the explicit
+`expire_pending_approvals()` operation may process the queue.
+
 ## Kill switch behavior
 
 When the kill switch is active, new payment actions must return `BLOCK` with reason code `KILL_SWITCH_ACTIVE`. Previously approved authorizations cannot bypass the switch, and the gateway fails closed if the kill-switch state cannot be read. Only authenticated approvers may enable or disable it, and each toggle is audited.
