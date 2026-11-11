@@ -28,7 +28,17 @@ class SpyTransport:
                         "payee": {"merchant_id": MERCHANT},
                         "payments": {
                             "captures": [
-                                {"id": "CAPTURE123", "status": "COMPLETED"}
+                                {
+                                    "id": "CAPTURE123",
+                                    "status": "COMPLETED",
+                                    "amount": {
+                                        "currency_code": "USD",
+                                        "value": "1.00",
+                                    },
+                                    "supplementary_data": {
+                                        "related_ids": {"order_id": "ORDER123"}
+                                    },
+                                }
                             ]
                         },
                     }
@@ -42,12 +52,33 @@ class SpyTransport:
                     {
                         "payments": {
                             "captures": [
-                                {"id": "CAPTURE123", "status": "COMPLETED"}
+                                {
+                                    "id": "CAPTURE123",
+                                    "status": "COMPLETED",
+                                    "amount": {
+                                        "currency_code": "USD",
+                                        "value": "1.00",
+                                    },
+                                    "supplementary_data": {
+                                        "related_ids": {"order_id": "ORDER123"}
+                                    },
+                                }
                             ]
                         }
                     }
                 ],
             }
         if method == "GET" and path == "/v2/payments/captures/CAPTURE123":
-            return 200, {"id": "CAPTURE123", "status": "COMPLETED"}
+            return 200, getattr(
+                self,
+                "capture_response",
+                {
+                    "id": "CAPTURE123",
+                    "status": "COMPLETED",
+                    "amount": {"currency_code": "USD", "value": "1.00"},
+                    "supplementary_data": {
+                        "related_ids": {"order_id": "ORDER123"}
+                    },
+                },
+            )
         raise AssertionError("unexpected PayPal request")

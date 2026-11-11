@@ -18,8 +18,14 @@ APPROVED = {"id": "ORDER123", "status": "APPROVED", "purchase_units": [{
     "amount": {"currency_code": "USD", "value": "1.00"},
     "payee": {"merchant_id": CONFIG.merchant_id},
 }]}
+CAPTURE_EVIDENCE = {
+    "id": "CAPTURE123",
+    "status": "COMPLETED",
+    "amount": {"currency_code": "USD", "value": "1.00"},
+    "supplementary_data": {"related_ids": {"order_id": "ORDER123"}},
+}
 CAPTURED = {"id": "ORDER123", "status": "COMPLETED", "purchase_units": [{
-    "payments": {"captures": [{"id": "CAPTURE123", "status": "COMPLETED"}]}
+    "payments": {"captures": [CAPTURE_EVIDENCE]}
 }]}
 
 
@@ -123,13 +129,31 @@ def test_merchant_mismatch_blocks_capture():
 
 
 def test_capture_success_and_status_lookup():
-    api, fake = client((200, APPROVED), (201, CAPTURED), (200, {"id": "CAPTURE123", "status": "COMPLETED"}))
+    api, fake = client((200, APPROVED), (201, CAPTURED), (200, CAPTURE_EVIDENCE))
     result = api.capture_order("ORDER123", "capture-001", "1.00")
     assert result["capture_status"] == "COMPLETED"
     assert fake.calls[2][2]["PayPal-Request-Id"] == request_id(CONFIG.merchant_id, "capture", "capture-001")
     assert fake.calls[2][3] == b"{}"
-    assert api.get_capture("CAPTURE123") == {"capture_id": "CAPTURE123", "status": "COMPLETED"}
+    assert api.get_capture("CAPTURE123") == {
+        "capture_id": "CAPTURE123",
+        "status": "COMPLETED",
+        "amount": "1.00",
+        "currency": "USD",
+        "related_order_id": "ORDER123",
+    }
     assert fake.calls[-1][1] == "/v2/payments/captures/CAPTURE123"
+
+
+def test_get_capture_missing_nested_evidence_is_returned_as_missing():
+    api, _ = client((200, {"id": "CAPTURE123", "status": "COMPLETED"}))
+
+    assert api.get_capture("CAPTURE123") == {
+        "capture_id": "CAPTURE123",
+        "status": "COMPLETED",
+        "amount": None,
+        "currency": None,
+        "related_order_id": None,
+    }
 
 
 def test_capture_failure_and_timeout():

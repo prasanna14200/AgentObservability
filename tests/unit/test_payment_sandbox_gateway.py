@@ -12,7 +12,8 @@ from agentsentinel.payment_gateway import PaymentGateway
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, SandboxStatusVerifier
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SQLiteReconciler
-from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig
+from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig, SandboxError
+from agentsentinel.payment_sqlite import ReconciliationSnapshot
 from agentsentinel.schema.payment import Money, PaymentAuthorization, PaymentIntent
 from scripts.demo_support import MERCHANT, SpyTransport
 
@@ -179,8 +180,6 @@ def test_manual_issuer_binds_fields_without_a_provider_call(tmp_path):
 
 
 def test_read_only_verifier_checks_capture_status_without_post(tmp_path):
-    from agentsentinel.payment_sqlite import ReconciliationSnapshot
-
     db, store, spy, client, gateway = setup(tmp_path)
     capture = make_intent(action="capture_order", operation="demo_capture", target="ORDER123")
     seed(db, capture)
@@ -197,3 +196,68 @@ def test_read_only_verifier_checks_capture_status_without_post(tmp_path):
     verified = SandboxStatusVerifier(client).verify(snapshot)
     assert verified.status == "COMPLETED" and verified.provider_capture_id == "CAPTURE123"
     assert len([call for call in spy.calls if call[0] == "POST"]) == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {},
+        {"id": "CAPTURE999"},
+        {"supplementary_data": {"related_ids": {"order_id": "ORDER999"}}},
+        {"amount": {"currency_code": "USD", "value": "2.00"}},
+        {"amount": {"currency_code": "EUR", "value": "1.00"}},
+        {"amount": {"currency_code": "USD"}},
+        {"amount": {"currency_code": "USD", "value": "1.00"},
+         "supplementary_data": {"related_ids": {}}},
+    ],
+    ids=[
+        "correct-evidence",
+        "wrong-capture-id",
+        "wrong-related-order-id",
+        "wrong-amount",
+        "wrong-currency",
+        "missing-amount",
+        "missing-related-order-id",
+    ],
+)
+def test_capture_reconciliation_requires_bound_evidence_and_never_posts(tmp_path, change):
+    from copy import deepcopy
+
+    _, _, spy, client, _ = setup(tmp_path)
+    spy.order_status = "COMPLETED"
+    evidence = {
+        "id": "CAPTURE123",
+        "status": "COMPLETED",
+        "amount": {"currency_code": "USD", "value": "1.00"},
+        "supplementary_data": {"related_ids": {"order_id": "ORDER123"}},
+    }
+    evidence.update(deepcopy(change))
+    spy.capture_response = evidence
+    client.authenticate()
+    before_posts = [call for call in spy.calls if call[0] == "POST"]
+    snapshot = ReconciliationSnapshot(
+        operation_id="demo_capture",
+        state="UNCERTAIN",
+        dispatch_state="MAY_HAVE_DISPATCHED",
+        action="capture_order",
+        merchant_id=MERCHANT,
+        amount_text="1.00",
+        currency="USD",
+        target_order_id="ORDER123",
+        attempt_id="attempt_001",
+        idempotency_key=None,
+        provider_order_id="ORDER123",
+        provider_capture_id="CAPTURE123",
+        fingerprint="f" * 64,
+    )
+
+    if change:
+        with pytest.raises(SandboxError):
+            SandboxStatusVerifier(client).verify(snapshot)
+    else:
+        verified = SandboxStatusVerifier(client).verify(snapshot)
+        assert verified.status == "COMPLETED"
+        assert verified.provider_capture_id == "CAPTURE123"
+
+    assert [call for call in spy.calls if call[0] == "POST"] == before_posts
+    assert not any(call[1].endswith("/capture") for call in spy.calls)

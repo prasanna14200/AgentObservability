@@ -224,5 +224,16 @@ class PayPalSandboxClient:
 
     def get_capture(self, capture_id: str) -> dict:
         data = self._call("GET", f"/v2/payments/captures/{_identifier(capture_id, 'capture ID')}")
+        amount_data = data.get("amount")
+        amount_data = amount_data if isinstance(amount_data, dict) else {}
+        supplementary_data = data.get("supplementary_data")
+        supplementary_data = supplementary_data if isinstance(supplementary_data, dict) else {}
+        related_ids = supplementary_data.get("related_ids")
+        related_ids = related_ids if isinstance(related_ids, dict) else {}
         return {"capture_id": _identifier(data.get("id"), "PayPal capture ID"),
-                "status": str(data.get("status", "UNKNOWN"))}
+                "status": str(data.get("status", "UNKNOWN")),
+                "amount": amount_data.get("value") if isinstance(amount_data.get("value"), str) else None,
+                "currency": (amount_data.get("currency_code")
+                             if isinstance(amount_data.get("currency_code"), str) else None),
+                "related_order_id": (related_ids.get("order_id")
+                                     if isinstance(related_ids.get("order_id"), str) else None)}

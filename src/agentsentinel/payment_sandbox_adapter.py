@@ -61,8 +61,23 @@ class SandboxStatusVerifier(SandboxReadOnlyVerifier):
         capture_id = order["capture_id"] or snapshot.provider_capture_id
         if capture_id is None:
             return VerifiedOutcome(status="STILL_UNCERTAIN", provider_order_id=order_id, **common)
+        if (snapshot.provider_capture_id is not None and order["capture_id"] is not None
+                and snapshot.provider_capture_id != order["capture_id"]):
+            raise SandboxError("Sandbox capture binding mismatch during reconciliation")
         capture = self._client.get_capture(capture_id)
+        if (capture["capture_id"] != capture_id or capture["related_order_id"] != order_id
+                or capture["currency"] != snapshot.currency):
+            raise SandboxError("Sandbox capture binding mismatch during reconciliation")
+        try:
+            capture_amount_matches = (
+                capture["amount"] is not None
+                and Decimal(capture["amount"]) == Decimal(snapshot.amount_text)
+            )
+        except (ArithmeticError, InvalidOperation, TypeError, ValueError):
+            capture_amount_matches = False
+        if not capture_amount_matches:
+            raise SandboxError("Sandbox capture amount mismatch during reconciliation")
         status = ("COMPLETED" if order["status"] == "COMPLETED" and capture["status"] == "COMPLETED"
-                  and capture["capture_id"] == capture_id else "STILL_UNCERTAIN")
+                  else "STILL_UNCERTAIN")
         return VerifiedOutcome(status=status, provider_order_id=order_id,
                                provider_capture_id=capture_id, **common)
