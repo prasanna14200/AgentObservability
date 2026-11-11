@@ -860,6 +860,8 @@ def create_app(
     approver_secret: str | None = None,
     viewer_secret: str | None = None,
     telemetry_db_path: str | Path | None = None,
+    failures_path: str | Path | None = None,
+    demo_mode: bool = False,
     ttl_seconds: int = 3600,
     host: str = "127.0.0.1",
 ) -> FastAPI:
@@ -884,6 +886,8 @@ def create_app(
             approver_secret=approver_secret,
             viewer_secret=viewer_secret,
             telemetry_db_path=Path(telemetry_db_path) if telemetry_db_path else None,
+            failures_path=Path(failures_path) if failures_path else None,
+            demo_mode=demo_mode,
         )
     )
 
@@ -1005,10 +1009,7 @@ def create_app(
     return app
 
 
-app = create_app()
-
-
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(create_app(), host="127.0.0.1", port=8000)

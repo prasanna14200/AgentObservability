@@ -19,6 +19,7 @@ secrets/
 id_rsa
 id_ed25519
 data/paypal_sandbox/
+data/agentsentinel_dashboard_demo/
 data/synthetic/*
 !data/synthetic/v3/
 data/collected/

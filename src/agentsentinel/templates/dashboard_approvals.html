@@ -3,7 +3,7 @@
   <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Approvals — AgentSentinel</title><link rel="stylesheet" href="/dashboard/static/dashboard.css" /></head>
   <body>
     <header class="topbar"><a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a><nav><a href="/dashboard">Overview</a><a href="/dashboard/traces">Payment traces</a><a href="/dashboard/alerts">Security alerts</a><a href="/dashboard/approvals">Approvals</a><a href="/dashboard/demo">Offline demo</a></nav><span class="badge">{{ role }}</span></header>
-    <main class="page"><p class="eyebrow">EXISTING TRUSTED APPROVAL STORE</p><h1>Human approval queue</h1>
+    <main class="page">{% if demo_mode %}<p class="warning" role="note">LOCAL MOCK DEMONSTRATION - isolated approval data; no PayPal requests are made.</p>{% endif %}<p class="eyebrow">EXISTING TRUSTED APPROVAL STORE</p><h1>Human approval queue</h1>
       <p class="muted">Read-only queue view. Actions require the approver role, CSRF token, explicit confirmation, exact stored fingerprint, unexpired state, and a fresh kill-switch check. Approval is not execution.</p>
       {% if items is none %}<section class="empty-state"><h2>No data</h2><p>The approval database is unavailable.</p></section>
       {% elif items %}

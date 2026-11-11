@@ -728,10 +728,26 @@ def create_dashboard_router(
     approver_secret: str | None = None,
     viewer_secret: str | None = None,
     telemetry_db_path: Path | None = None,
-    failures_path: Path = _FAILURES_FILE,
+    failures_path: Path | None = None,
+    demo_mode: bool = False,
 ) -> APIRouter:
     router = APIRouter()
     telemetry_db_path = telemetry_db_path or _TELEMETRY_DB
+    failures_path = failures_path or _FAILURES_FILE
+
+    def render(
+        request: Request,
+        template: str,
+        context: dict[str, Any],
+        *,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        return _render(
+            request,
+            template,
+            {"demo_mode": demo_mode, **context},
+            status_code=status_code,
+        )
 
     def authenticated_role(request: Request) -> Literal["viewer", "approver"]:
         signing_secret = _configured_secret(approver_secret, "APPROVER_SECRET")
@@ -745,7 +761,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/login", response_class=HTMLResponse)
     async def dashboard_login(request: Request) -> HTMLResponse:
-        return _render(request, "dashboard_login.html", {"error": None})
+        return render(request, "dashboard_login.html", {"error": None})
 
     @router.post("/dashboard/login")
     async def dashboard_login_submit(request: Request) -> Response:
@@ -761,7 +777,7 @@ def create_dashboard_router(
         elif viewer and len(viewer) >= 32 and _constant_time_equal(supplied, viewer):
             role = "viewer"
         else:
-            return _render(
+            return render(
                 request,
                 "dashboard_login.html",
                 {"error": "Authentication failed."},
@@ -807,7 +823,7 @@ def create_dashboard_router(
             store=store,
             role=role,
         )
-        return _render(request, "dashboard_overview.html", context)
+        return render(request, "dashboard_overview.html", context)
 
     @router.get("/dashboard/traces", response_class=HTMLResponse)
     async def dashboard_traces(
@@ -854,7 +870,7 @@ def create_dashboard_router(
         except (sqlite3.Error, OSError, PaymentAuditUnavailable):
             traces, total = [], 0
             telemetry_warning = _telemetry_warning({**audit, "status": "Unavailable"})
-        return _render(
+        return render(
             request,
             "dashboard_traces.html",
             {
@@ -903,7 +919,7 @@ def create_dashboard_router(
             telemetry_warning = _telemetry_warning({**audit, "status": "Unavailable"})
         if not events:
             if telemetry_warning is not None:
-                return _render(
+                return render(
                     request,
                     "dashboard_trace_detail.html",
                     {
@@ -917,7 +933,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="trace not found")
         trace = _trace_summary(trace_id, events)
         trace.update(_read_operation_lifecycle(payment_db_path, trace["operation_id"]))
-        return _render(
+        return render(
             request,
             "dashboard_trace_detail.html",
             {
@@ -959,7 +975,7 @@ def create_dashboard_router(
         except (sqlite3.Error, OSError, PaymentAuditUnavailable):
             alerts = []
             telemetry_warning = _telemetry_warning({**audit, "status": "Unavailable"})
-        return _render(
+        return render(
             request,
             "dashboard_alerts.html",
             {
@@ -980,7 +996,7 @@ def create_dashboard_router(
             return RedirectResponse("/dashboard/login", status_code=status.HTTP_303_SEE_OTHER)
         now = datetime.now(timezone.utc)
         items = _read_approval_rows(payment_db_path, now)
-        return _render(
+        return render(
             request,
             "dashboard_approvals.html",
             {"role": role, "items": items, "now": now.isoformat()},
@@ -1056,7 +1072,7 @@ def create_dashboard_router(
             store=store,
             role=role,
         )
-        return _render(request, "dashboard_overview.html", context)
+        return render(request, "dashboard_overview.html", context)
 
     @router.get("/dashboard/demo", response_class=HTMLResponse)
     async def dashboard_demo(request: Request) -> HTMLResponse:
@@ -1130,7 +1146,7 @@ def create_dashboard_router(
                 chain.append(event)
             audit = chain.verify()
             audit_status = "VALID" if audit.valid else "INVALID"
-        return _render(
+        return render(
             request,
             "dashboard_demo.html",
             {

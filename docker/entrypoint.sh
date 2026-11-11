@@ -14,4 +14,4 @@ if [ "${#APPROVER_SECRET}" -lt 32 ]; then
 fi
 export APPROVER_SECRET
 
-exec uvicorn agentsentinel.approval_service:app --host 0.0.0.0 --port 8000
+exec uvicorn agentsentinel.approval_service:create_app --factory --host 0.0.0.0 --port 8000

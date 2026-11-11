@@ -103,6 +103,16 @@ customer-support Isolation Forest result is PR-AUC 0.706 and FPR 56.9%; the
 rules baseline is PR-AUC 0.463 and FPR 0%. Gate C therefore fails the registered
 10% FPR ceiling.
 
+Latest checkout verification (not a fresh-clone test) used Python 3.10.11,
+FastAPI 0.135.0, and Uvicorn 0.32.0: the full suite passed **489 tests** with
+one platform-dependent symlink test skipped; the offline attack suite passed
+**22/22**; and the side-by-side mock showed USD 9.00 only in the deliberately
+unprotected mock path and USD 0.00 in the protected path. The seeded dashboard
+runner remains disabled. No PayPal calls were made. The heuristic secret scan
+checked 205 worktree files and 472 reachable history blobs without reporting
+high-confidence credential signatures; this is not proof that no secret
+exists.
+
 GitHub Actions runs the test suite, compile check, offline attack suite, and
 wheel build on Python 3.10 and 3.12. A separate security job scans the complete
 reachable Git history and audits the pinned container dependency lock. These
@@ -111,63 +121,30 @@ application. The workflow is a CI gate only; deployment remains a separately
 reviewed step.
 
 To start the localhost-only approval service and dashboard after installing
-the `day10` optional dependencies:
+the `day10` optional dependencies, point it at a fresh temporary database
+instead of the default Sandbox database:
 
 ```powershell
+$env:APPROVAL_DB_PATH = Join-Path $env:TEMP ("agentsentinel-dashboard-" + [guid]::NewGuid().ToString('N') + ".sqlite")
 .\.venv\Scripts\python.exe run.py
 ```
 
 Set `APPROVER_SECRET` in the process environment or enter a value of at least
 32 characters when the hidden-input prompt appears. The startup command never
 prints the secret and strips PayPal-related variables from the service
-process. Visit `http://127.0.0.1:8000/dashboard`; do not expose this prototype
-to a public network. `/health` is liveness; `/ready` checks only local
-approval-store kill-switch availability.
+process. Visit `http://127.0.0.1:8000/dashboard/login`, authenticate with that
+local approver credential, then open `/dashboard/demo` for the separate
+synthetic walkthrough. The temporary database file is retained; do not point
+the command at existing user or Sandbox data. Do not expose this prototype to a
+public network. `/health` is liveness; `/ready` checks only local approval-store
+kill-switch availability.
 
-## Local Docker demo (SQLite prototype only)
-
-The local Compose profile binds the dashboard to loopback and stores current
-SQLite payment, approval, and telemetry data in a named Docker volume. It does
-not include PayPal credentials, enable Sandbox dispatch, or use PostgreSQL.
-This is a reproducible local demo container, not the production deployment
-architecture. The PostgreSQL migration boundary and safe cutover requirements
-are documented in [the migration plan](docs/POSTGRESQL_MIGRATION_PLAN.md).
-
-Create a separate local approver secret file without displaying its value:
-
-```powershell
-New-Item -ItemType Directory -Force secrets | Out-Null
-$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-$bytes = New-Object byte[] 48
-$rng.GetBytes($bytes)
-[System.IO.File]::WriteAllText(
-    (Join-Path $PWD 'secrets\approver_secret'),
-    [Convert]::ToBase64String($bytes)
-)
-[Array]::Clear($bytes, 0, $bytes.Length)
-$rng.Dispose()
-Remove-Variable rng, bytes
-```
-
-Build and run locally:
-
-```powershell
-docker compose build
-docker compose up -d
-docker compose ps
-```
-
-Open `http://127.0.0.1:8000`. The app uses a read-only container filesystem,
-non-root user, dropped Linux capabilities, a read-only mounted secret, and a
-persistent named volume. Do not run `docker compose down -v` unless you
-intentionally want to delete all local demo state. The Compose health check
-only exercises the current SQLite `/ready` endpoint; it is not production
-dependency monitoring or a backup check. Docker build/runtime has not been
-verified on this workstation because the Docker Engine is unavailable.
-
-The volume is local persistence, not a backup. No restore drill, PostgreSQL
-backend, or public deployment is implemented. Do not put PayPal credentials in
-the approver-secret file or pass provider secrets to this container.
+The in-process comparison is the judge-runnable mock payment demonstration.
+The seeded dashboard runner, `scripts/run_demo_dashboard.py`, is deliberately
+disabled until its Windows demo-data boundary can be independently established;
+it exits before creating demo data or starting a service. The authenticated
+`/dashboard/demo` page is a separate synthetic walkthrough and does not seed
+the persisted dashboard. See the [demo runbook](docs/DEMO_RUNBOOK.md).
 
 ## Optional local Ollama experiment
 
@@ -214,12 +191,13 @@ independently verified through read-only order and capture GETs. See the
 - [Hackathon Day handoffs and status](docs/paypal_hackathon/PROGRESS.md)
 - [Day 14 guard quickstart](docs/paypal_hackathon/14_quickstart.md)
 
-The GitHub repository currently has no configured Actions workflows, so there
-is no hosted CI result to report. Use the local commands above. SQLite, local
-process boundaries, and the audit chain are prototype controls: this project
-does not promise external exactly-once payment execution, cancellation of an
-already admitted provider call, tamper-proof audit storage, production
-authentication, or isolation of arbitrary Python code.
+The repository includes a GitHub Actions workflow at
+`.github/workflows/ci.yml`; its configured jobs are not evidence of a passing
+hosted run. Use the local commands above and check the workflow run separately.
+SQLite, local process boundaries, and the audit chain are prototype controls:
+this project does not promise external exactly-once payment execution,
+cancellation of an already admitted provider call, tamper-proof audit storage,
+production authentication, or isolation of arbitrary Python code.
 
 ## License
 

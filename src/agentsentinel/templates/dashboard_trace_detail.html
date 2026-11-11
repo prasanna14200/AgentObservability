@@ -4,6 +4,7 @@
   <body>
     <header class="topbar"><a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a><nav><a href="/dashboard">Overview</a><a href="/dashboard/traces">Payment traces</a><a href="/dashboard/alerts">Security alerts</a><a href="/dashboard/approvals">Approvals</a><a href="/dashboard/demo">Offline demo</a></nav><span class="badge">{{ role }}</span></header>
     <main class="page">
+      {% if demo_mode %}<p class="warning" role="note">LOCAL MOCK DEMONSTRATION - isolated seeded trace; no PayPal requests are made.</p>{% endif %}
       {% if telemetry_warning %}<p class="warning" role="status">{{ telemetry_warning }}</p>{% endif %}
       <a href="/dashboard/traces">← Back to traces</a><p class="eyebrow">CORRELATED PAYMENT SPANS</p><h1>Trace {{ trace.trace_id }}</h1>
       <section class="metric-grid compact">

@@ -10,6 +10,7 @@
     <main class="login-card">
       <p class="eyebrow">LOCAL CONTROL PLANE</p>
       <h1>AgentSentinel</h1>
+      {% if demo_mode %}<p class="warning" role="note">LOCAL MOCK DEMONSTRATION - isolated demo data; no PayPal requests are made.</p>{% endif %}
       <p>Sign in with an operator credential. Dashboard sessions expire after one hour.</p>
       {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
       <form method="post" action="/dashboard/login">

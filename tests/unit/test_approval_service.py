@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +16,94 @@ from agentsentinel.payment_policy import AuthenticatedScope
 from agentsentinel.schema.payment import Money, PaymentIntent
 
 NOW = datetime(2026, 10, 14, 12, 0, tzinfo=timezone.utc)
+
+
+def test_import_does_not_initialize_default_approval_database(tmp_path):
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    environment = os.environ.copy()
+    environment.pop("APPROVAL_DB_PATH", None)
+    environment["PYTHONPATH"] = str(source_root)
+    script = """
+import sqlite3
+from pathlib import Path
+
+def reject_connection(*args, **kwargs):
+    raise AssertionError("module import connected to SQLite")
+
+sqlite3.connect = reject_connection
+import agentsentinel.approval_service
+assert not Path("data/paypal_sandbox").exists()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "data" / "paypal_sandbox").exists()
+
+
+def test_create_app_initializes_explicit_temporary_database(tmp_path):
+    database_path = tmp_path / "approval.sqlite"
+
+    app = create_app(db_path=database_path, approver_secret="a" * 32)
+
+    assert database_path.is_file()
+    assert app.state.approval_store.path == database_path
+
+
+def test_uvicorn_factory_loads_create_app_with_temporary_database(
+    tmp_path, monkeypatch
+):
+    from uvicorn import Config
+
+    database_path = tmp_path / "uvicorn-factory.sqlite"
+    monkeypatch.setenv("APPROVAL_DB_PATH", str(database_path))
+    config = Config("agentsentinel.approval_service:create_app", factory=True)
+
+    config.load()
+
+    assert config.loaded_app is not None
+    assert database_path.is_file()
+
+
+def test_module_execution_creates_app_without_starting_server(tmp_path):
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    database_path = tmp_path / "module-startup.sqlite"
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(source_root)
+    environment["APPROVAL_DB_PATH"] = str(database_path)
+    script = """
+import os
+import runpy
+import sys
+import types
+from pathlib import Path
+
+calls = []
+uvicorn = types.ModuleType("uvicorn")
+uvicorn.run = lambda app, **kwargs: calls.append((app, kwargs))
+sys.modules["uvicorn"] = uvicorn
+runpy.run_module("agentsentinel.approval_service", run_name="__main__")
+assert len(calls) == 1
+app, options = calls[0]
+assert app.state.approval_store.path == Path(os.environ["APPROVAL_DB_PATH"])
+assert options == {"host": "127.0.0.1", "port": 8000}
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert database_path.is_file()
 
 
 def make_intent(operation_id: str = "op_approval_001") -> PaymentIntent:

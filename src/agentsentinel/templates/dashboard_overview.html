@@ -22,11 +22,12 @@
       </form>
     </header>
     <main class="page">
+      {% if demo_mode %}<p class="warning" role="note">LOCAL MOCK DEMONSTRATION - isolated seeded data; no PayPal requests are made.</p>{% endif %}
       <div class="page-heading">
         <div>
           <p class="eyebrow">PAYMENT SAFETY · LOCAL ONLY</p>
           <h1>Overview</h1>
-          <p class="muted">Persisted operational data only. Synthetic demo data is kept separate.</p>
+          <p class="muted">{% if demo_mode %}Isolated seeded mock operations and audit telemetry.{% else %}Persisted operational data only. Synthetic demo data is kept separate.{% endif %}</p>
         </div>
         <span class="badge">Authenticated · {{ role }}</span>
       </div>

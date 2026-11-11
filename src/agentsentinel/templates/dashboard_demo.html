@@ -3,6 +3,7 @@
   <head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>Offline demo — AgentSentinel</title><link rel="stylesheet" href="/dashboard/static/dashboard.css" /></head>
   <body>
     <header class="topbar"><a class="brand" href="/dashboard">AgentSentinel <span>CONTROL CENTER</span></a><nav><a href="/dashboard">Overview</a><a href="/dashboard/traces">Payment traces</a><a href="/dashboard/alerts">Security alerts</a><a href="/dashboard/approvals">Approvals</a><a href="/dashboard/demo">Offline demo</a></nav><span class="badge demo-badge">OFFLINE DEMO</span></header>
+    {% if demo_mode %}<p class="warning" role="note">LOCAL MOCK DEMONSTRATION - this page remains synthetic and separate from seeded data; no PayPal requests are made.</p>{% endif %}
     <main class="page"><p class="eyebrow">REPRODUCIBLE · SYNTHETIC · NO PAYMENT EXECUTION</p><h1>Offline security walkthrough</h1>
       <section class="notice"><strong>OFFLINE DEMO MODE</strong><p>Seed {{ seed }} · generated on request · separate from persisted overview metrics. No PayPal calls, database import, authorization issuance, or persistent kill-switch change occurs.</p></section>
       <div class="table-wrap"><table><thead><tr><th>Walkthrough scenario</th><th>Trace</th><th>Decision</th><th>Reasons</th><th>Outcome</th><th>Advisory</th><th>Evidence note</th></tr></thead><tbody>

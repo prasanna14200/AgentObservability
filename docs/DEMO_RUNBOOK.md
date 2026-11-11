@@ -51,6 +51,18 @@ LangGraph 1.2.15, Ollama Python client 0.6.3, FastAPI 0.115.14, Uvicorn
 declared in `pyproject.toml`; a future resolution may select newer compatible
 versions for the unpinned base dependencies.
 
+That FastAPI version is historical environment evidence. The current
+`pyproject.toml` and `requirements-container.lock` pin FastAPI 0.135.0; this
+work did not verify 0.115.14 in a clean environment or change either pin.
+
+Latest checkout validation (not a fresh-clone test) used Python 3.10.11,
+FastAPI 0.135.0, and Uvicorn 0.32.0. The full suite passed **489 tests** with
+one directory-symlink test skipped because symlink creation was unavailable;
+the offline attack suite passed **22/22** with zero PayPal calls. The
+value-suppressing heuristic scan checked 205 worktree files and 472 reachable
+history blobs and found no high-confidence credential signatures. No clean
+environment test was performed against FastAPI 0.115.14.
+
 ## 3. Run security scenarios and comparison
 
 ```powershell
@@ -76,7 +88,42 @@ uncertain outcomes, limits and budgets, prompt injection, approval fingerprint
 and kill-switch conditions, advisory precedence, telemetry failure, and audit
 tampering. Spy transport count is zero for each attack attempt.
 
-## 4. Optional local LLM run
+## 4. Local dashboard and seeded mock status
+
+The existing authenticated `/dashboard/demo` page is a separate synthetic
+walkthrough. To view it without using the default Sandbox database, start the
+service with a newly named temporary approval database:
+
+```powershell
+$env:APPROVAL_DB_PATH = Join-Path $env:TEMP ("agentsentinel-dashboard-" + [guid]::NewGuid().ToString('N') + ".sqlite")
+.\.venv\Scripts\python.exe run.py
+```
+
+Use the hidden-input approver prompt, sign in at
+`http://127.0.0.1:8000/dashboard/login`, then open
+`http://127.0.0.1:8000/dashboard/demo`. The temporary database is retained;
+the command does not use or seed the existing Sandbox database.
+
+**Paused:** the demo runner fails closed until the Windows demo-data security
+boundary can be independently verified. An existing directory, static
+symlink/reparse-point checks, or operator assertion is not sufficient. There
+is currently no supported configuration that enables seeding. Invoking the
+runner without `--reset` exits before directory creation, database
+initialization, audit writes, payment operations, credential generation, or
+service startup. `--reset` also fails closed without filesystem mutation.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_demo_dashboard.py
+```
+
+No directory permission configuration currently overrides this fail-closed
+decision. Do not use the script to seed the dashboard until a safe Windows
+directory boundary is independently established and the runner is explicitly
+updated to support it.
+The dashboard's existing `/dashboard/demo` synthetic walkthrough remains
+separate and unchanged in behavior.
+
+## 5. Optional local LLM run
 
 Only run if Ollama and the model are already installed locally. Do not run
 `ollama pull` as part of this workflow. The script has a preflight check and
@@ -91,7 +138,7 @@ all five were blocked by `AUTHORIZATION_MERCHANT_MISMATCH`, and fake money
 moved was USD 0.00. The run logged token counts only, not prompt or output
 text. This one-model, five-trial observation is not a general security claim.
 
-## 5. Optional local checks
+## 6. Optional local checks
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\scan_secrets.py
