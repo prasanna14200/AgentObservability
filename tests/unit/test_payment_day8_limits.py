@@ -11,7 +11,8 @@ from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SafetyLimits
 from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig
 
-from test_payment_sandbox_gateway import CONTEXT, MERCHANT, SpyTransport, make_intent, seed
+from scripts.demo_support import MERCHANT, SpyTransport
+from test_payment_sandbox_gateway import CONTEXT, make_intent, seed
 
 
 def gateway_for(tmp_path, limits):

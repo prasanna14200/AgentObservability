@@ -128,7 +128,7 @@ def _capture_from_order(data: dict) -> tuple[str | None, str | None]:
 class PayPalSandboxClient:
     def __init__(self, config: SandboxConfig, transport: Transport | None = None):
         self.config = config
-        self.transport = transport or UrlLibTransport()
+        self.transport = transport if transport is not None else UrlLibTransport()
         self._token: str | None = None
 
     def authenticate(self) -> None:

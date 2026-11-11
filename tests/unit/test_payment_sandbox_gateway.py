@@ -14,39 +14,9 @@ from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, Sandbox
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SQLiteReconciler
 from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig
 from agentsentinel.schema.payment import Money, PaymentAuthorization, PaymentIntent
+from scripts.demo_support import MERCHANT, SpyTransport
 
-MERCHANT = "ABCDEFGH"
 CONTEXT = AuthenticatedScope(principal_id="demo_user", scope_id="demo_scope")
-
-
-class SpyTransport:
-    def __init__(self, *, timeout_post=False, order_status="APPROVED", create_status="CREATED"):
-        self.calls = []
-        self.timeout_post = timeout_post
-        self.order_status = order_status
-        self.create_status = create_status
-
-    def request(self, method, path, headers, body):
-        self.calls.append((method, path, headers.get("PayPal-Request-Id")))
-        if path == "/v1/oauth2/token":
-            return 200, {"access_token": "fake_test_token"}
-        if method == "POST" and path == "/v2/checkout/orders":
-            if self.timeout_post:
-                raise TimeoutError("spy timeout")
-            return 201, {"id": "ORDER123", "status": self.create_status}
-        if method == "GET" and path == "/v2/checkout/orders/ORDER123":
-            return 200, {"id": "ORDER123", "status": self.order_status, "purchase_units": [{
-                "amount": {"currency_code": "USD", "value": "1.00"},
-                "payee": {"merchant_id": MERCHANT},
-                "payments": {"captures": [{"id": "CAPTURE123", "status": "COMPLETED"}]},
-            }]}
-        if method == "POST" and path == "/v2/checkout/orders/ORDER123/capture":
-            return 201, {"id": "ORDER123", "status": "COMPLETED", "purchase_units": [{
-                "payments": {"captures": [{"id": "CAPTURE123", "status": "COMPLETED"}]}
-            }]}
-        if method == "GET" and path == "/v2/payments/captures/CAPTURE123":
-            return 200, {"id": "CAPTURE123", "status": "COMPLETED"}
-        raise AssertionError("unexpected PayPal request")
 
 
 def make_intent(*, amount="1.00", merchant=MERCHANT, action="create_order", operation="demo_create",
@@ -101,6 +71,23 @@ def test_block_cases_call_paypal_zero_times(tmp_path, case):
     assert result.status == "REJECTED" and result.decision.outcome == "BLOCK"
     assert spy.calls == []
     assert store.audit_operation(intent.operation_id).state == "REJECTED"
+
+
+def test_falsey_injected_transport_is_preserved_and_used():
+    class FalseySpyTransport(SpyTransport):
+        def __bool__(self):
+            return False
+
+    transport = FalseySpyTransport()
+    client = PayPalSandboxClient(
+        SandboxConfig("fake_client", "fake_secret", MERCHANT),
+        transport,
+    )
+
+    client.authenticate()
+
+    assert client.transport is transport
+    assert transport.calls == [("POST", "/v1/oauth2/token", None)]
 
 
 def test_agent_supplied_authorization_cannot_enter_gateway(tmp_path):

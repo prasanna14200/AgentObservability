@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scripts import run_demo_dashboard
+from scripts import demo_support
 from scripts.run_demo_dashboard import (
     DEMO_DATA_PARENT,
     DEMO_MARKER,
@@ -30,6 +31,14 @@ from agentsentinel.observability.payment_audit import PaymentAuditChain
 from agentsentinel.payment_gateway import TrustedGatewayEntryPoint
 
 TEST_APPROVER_SECRET = "seeded-dashboard-test-operator-secret"
+
+
+def test_dashboard_and_tests_share_canonical_spy_transport():
+    assert not run_demo_dashboard._demo_seeding_enabled()
+    run_demo_dashboard._load_demo_dependencies()
+
+    assert run_demo_dashboard.SpyTransport is demo_support.SpyTransport
+    assert not run_demo_dashboard._demo_seeding_enabled()
 
 
 def _configure_demo_parent(tmp_path: Path, monkeypatch) -> Path:
@@ -96,6 +105,7 @@ def test_seeded_dashboard_scenarios_are_visible_and_use_safe_adapters(
         for scenario in state.scenarios
     } == expected
     assert state.mock_adapter.calls == 1
+    assert type(state.spy_transport) is run_demo_dashboard.SpyTransport
     assert [path for _, path, _ in state.spy_transport.calls] == [
         "/v1/oauth2/token",
         "/v2/checkout/orders",

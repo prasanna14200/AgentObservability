@@ -19,7 +19,9 @@ from tempfile import TemporaryDirectory
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests" / "unit"))
-from test_payment_sandbox_gateway import CONTEXT, MERCHANT, make_intent, seed  # noqa: E402
+sys.path.insert(0, str(ROOT))
+from scripts.demo_support import MERCHANT, SpyTransport  # noqa: E402
+from test_payment_sandbox_gateway import CONTEXT, make_intent, seed  # noqa: E402
 
 from agentsentinel.approval_service import ApprovalStore  # noqa: E402
 from agentsentinel.detectors.payment import PaymentDetection, PaymentDetectorAdapter  # noqa: E402
@@ -30,7 +32,6 @@ from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SafetyLimits  # noqa: E402
 from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig  # noqa: E402
-from test_payment_sandbox_gateway import SpyTransport  # noqa: E402
 
 
 @dataclass(frozen=True)

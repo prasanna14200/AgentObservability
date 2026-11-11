@@ -15,8 +15,9 @@ from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
-for import_path in (ROOT / "src", ROOT / "scripts", ROOT / "tests" / "unit"):
+for import_path in (ROOT, ROOT / "src", ROOT / "scripts", ROOT / "tests" / "unit"):
     sys.path.insert(0, str(import_path))
+
 
 _DEMO_DEPENDENCIES_LOADED = False
 
@@ -34,7 +35,7 @@ def _load_demo_dependencies() -> None:
     os.environ["APPROVAL_DB_PATH"] = ":memory:"
     try:
         from demo_side_by_side import MockPayPalAdapter  # noqa: E402
-        from test_payment_sandbox_gateway import MERCHANT, SpyTransport  # noqa: E402
+        from scripts.demo_support import MERCHANT, SpyTransport  # noqa: E402
 
         from agentsentinel.approval_service import ApprovalRecord, ApprovalStore, create_app  # noqa: E402
         from agentsentinel.data.payment_synth_traces import generate_payment_traces  # noqa: E402
@@ -403,6 +404,8 @@ def seed_demo_data(*, reset: bool = False) -> DemoSeed:
         SandboxConfig("mock_demo_client", "mock_demo_secret", MERCHANT),
         spy_transport,
     )
+    if mock_client.transport is not spy_transport:
+        raise RuntimeError("uncertain scenario transport was not retained")
     uncertain_gateway = PaymentGateway(
         policy,
         payments,
