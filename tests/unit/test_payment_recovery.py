@@ -381,6 +381,42 @@ def test_repeated_reconciliation_does_not_duplicate_transition_events(tmp_path):
         ).fetchone()[0] == 1
 
 
+def test_two_recovery_workers_mark_dispatched_operation_uncertain_once(tmp_path):
+    db = tmp_path / "dispatched-recovery.sqlite"
+    request = make_intent()
+    seed_authorization(db, request)
+
+    repository = payment_store(db)
+    reserve_and_claim(repository, request, mark_dispatched=True)
+
+    one, two = payment_store(db), payment_store(db)
+    barrier = Barrier(2)
+
+    def recover(store):
+        barrier.wait(timeout=5)
+        return PaymentRecoveryWorker(
+            store, stale_after=timedelta(0)
+        ).run_once()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reports = list(pool.map(recover, (one, two)))
+
+    assert sum(report.scanned for report in reports) == 1
+    assert sum(report.marked_uncertain for report in reports) == 1
+    assert sum(report.recovered_not_dispatched for report in reports) == 0
+    assert row_state(db) == ("UNCERTAIN", "MAY_HAVE_DISPATCHED")
+
+    events = recovery_events(db)
+    assert len(events) == 1
+    assert events[0] == (
+        "CLAIMED",
+        "UNCERTAIN",
+        "recovery",
+        "recovery",
+        "PROVIDER_OUTCOME_REQUIRES_RECONCILIATION",
+    )
+
+
 def test_two_recovery_workers_atomically_process_one_operation_once(tmp_path):
     db = tmp_path / "recovery.sqlite"
     request = make_intent()
