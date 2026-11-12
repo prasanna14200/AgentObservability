@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import AwareDatetime, field_validator
 
 from agentsentinel.observability.payment_events import (
@@ -22,6 +22,7 @@ from agentsentinel.observability.payment_events import (
     build_payment_event,
 )
 from agentsentinel.payment_policy import AuthenticatedScope, PolicyAudit, PolicyDecision, POLICY_VERSION
+from agentsentinel.payment_provider import ProviderMode
 from agentsentinel.schema.payment import Money, PaymentAction, PaymentAuthorization, PaymentIntent, PaymentModel, _check_id
 from agentsentinel.schema.payment_telemetry import PaymentEventType
 
@@ -110,6 +111,7 @@ class ApprovalRecord(PaymentModel):
     principal_id: str
     scope_id: str
     action: PaymentAction
+    provider_mode: ProviderMode = "MOCK"
     merchant_id: str
     amount_text: str
     currency: str
@@ -295,6 +297,11 @@ class ApprovalStore:
                     }
                     if "intent_snapshot" not in approval_columns:
                         conn.execute("ALTER TABLE approvals ADD COLUMN intent_snapshot TEXT")
+                    if "provider_mode" not in approval_columns:
+                        conn.execute(
+                            "ALTER TABLE approvals ADD COLUMN provider_mode TEXT NOT NULL "
+                            "DEFAULT 'MOCK' CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE'))"
+                        )
                     authorization_columns = {
                         row["name"] for row in conn.execute("PRAGMA table_info(authorizations)")
                     }
@@ -302,6 +309,11 @@ class ApprovalStore:
                         conn.execute("ALTER TABLE authorizations ADD COLUMN approval_id TEXT")
                     if "approval_reason_codes" not in authorization_columns:
                         conn.execute("ALTER TABLE authorizations ADD COLUMN approval_reason_codes TEXT")
+                    if "provider_mode" not in authorization_columns:
+                        conn.execute(
+                            "ALTER TABLE authorizations ADD COLUMN provider_mode TEXT NOT NULL "
+                            "DEFAULT 'MOCK' CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE'))"
+                        )
                     if existing_tables == 0:
                         conn.execute(
                             "INSERT INTO kill_switch(key,enabled,updated_at,reason_code) VALUES(?,?,?,?)",
@@ -334,6 +346,7 @@ class ApprovalStore:
             principal_id=row["principal_id"],
             scope_id=row["scope_id"],
             action=row["action"],
+            provider_mode=row["provider_mode"],
             merchant_id=row["merchant_id"],
             amount_text=row["amount_text"],
             currency=row["currency"],
@@ -386,10 +399,16 @@ class ApprovalStore:
         approval_id: str | None = None,
         expires_at: datetime | None = None,
         defer_telemetry: bool = False,
+        provider_mode: ProviderMode = "MOCK",
     ) -> ApprovalRecord:
+        if provider_mode not in {"MOCK", "SANDBOX"}:
+            raise ValueError("approvals are unavailable for this provider mode")
         intent = PaymentIntent.model_validate(intent.model_dump(mode="python"))
         context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
-        request_fingerprint = hashlib.sha256((intent.model_dump_json() + "|" + context.model_dump_json()).encode("utf-8")).hexdigest()
+        request_fingerprint = hashlib.sha256(
+            (intent.model_dump_json() + "|" + context.model_dump_json() + "|" + provider_mode)
+            .encode("utf-8")
+        ).hexdigest()
         approval_id = approval_id or self._approval_id_for(intent.operation_id, intent.trace_id, intent.intent_id)
         expires = expires_at or (self._now() + timedelta(seconds=self.ttl_seconds))
         with self._write() as conn:
@@ -400,7 +419,17 @@ class ApprovalStore:
                 (intent.operation_id,),
             ).fetchone()
             if existing is not None:
-                if existing["request_fingerprint"] != request_fingerprint:
+                legacy_mock_fingerprint = hashlib.sha256(
+                    (intent.model_dump_json() + "|" + context.model_dump_json()).encode("utf-8")
+                ).hexdigest()
+                if (
+                    existing["request_fingerprint"] != request_fingerprint
+                    and not (
+                        provider_mode == "MOCK"
+                        and existing["provider_mode"] == "MOCK"
+                        and existing["request_fingerprint"] == legacy_mock_fingerprint
+                    )
+                ):
                     raise ValueError("approval conflict: request fingerprint mismatch")
                 return self._row_to_approval(existing)
             row = ApprovalRecord(
@@ -411,6 +440,7 @@ class ApprovalStore:
                 principal_id=context.principal_id,
                 scope_id=context.scope_id,
                 action=intent.action,
+                provider_mode=provider_mode,
                 merchant_id=intent.merchant_id,
                 amount_text=str(intent.money.amount),
                 currency=intent.money.currency,
@@ -423,7 +453,7 @@ class ApprovalStore:
                 decision_reason="PENDING",
             )
             conn.execute(
-                "INSERT INTO approvals(approval_id,operation_id,trace_id,intent_id,principal_id,scope_id,action,merchant_id,amount_text,currency,target_order_id,request_fingerprint,created_at,expires_at,status,reason_codes,decision_reason,intent_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO approvals(approval_id,operation_id,trace_id,intent_id,principal_id,scope_id,action,provider_mode,merchant_id,amount_text,currency,target_order_id,request_fingerprint,created_at,expires_at,status,reason_codes,decision_reason,intent_snapshot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     row.approval_id,
                     row.operation_id,
@@ -432,6 +462,7 @@ class ApprovalStore:
                     row.principal_id,
                     row.scope_id,
                     row.action,
+                    row.provider_mode,
                     row.merchant_id,
                     row.amount_text,
                     row.currency,
@@ -485,7 +516,8 @@ class ApprovalStore:
                        z.scope_id AS auth_scope_id, z.intent_id AS auth_intent_id,
                        z.operation_id AS auth_operation_id, z.merchant_id AS auth_merchant_id,
                        z.amount_text AS auth_amount_text, z.currency AS auth_currency,
-                       z.action AS auth_action, z.target_order_id AS auth_target_order_id,
+                       z.action AS auth_action, z.provider_mode AS auth_provider_mode,
+                       z.target_order_id AS auth_target_order_id,
                        z.issued_at AS auth_issued_at, z.expires_at AS auth_expires_at,
                        z.status AS auth_status, z.closed_at AS auth_closed_at,
                        z.record_origin AS auth_record_origin, z.approval_id AS auth_approval_id,
@@ -496,7 +528,12 @@ class ApprovalStore:
                 """,
                 (approval_id,),
             ).fetchone()
-        if row is None or row["status"] != "APPROVED" or not row["intent_snapshot"]:
+        if (
+            row is None
+            or row["status"] != "APPROVED"
+            or row["provider_mode"] == "LIVE"
+            or not row["intent_snapshot"]
+        ):
             return None
         try:
             intent = PaymentIntent.model_validate_json(row["intent_snapshot"])
@@ -505,6 +542,15 @@ class ApprovalStore:
                 scope_id=row["scope_id"],
             )
             expected_fingerprint = hashlib.sha256(
+                (
+                    intent.model_dump_json()
+                    + "|"
+                    + context.model_dump_json()
+                    + "|"
+                    + row["provider_mode"]
+                ).encode("utf-8")
+            ).hexdigest()
+            legacy_mock_fingerprint = hashlib.sha256(
                 (intent.model_dump_json() + "|" + context.model_dump_json()).encode("utf-8")
             ).hexdigest()
             authorization = PaymentAuthorization.model_validate({
@@ -516,6 +562,7 @@ class ApprovalStore:
                 "merchant_id": row["auth_merchant_id"],
                 "money": Money(amount=row["auth_amount_text"], currency=row["auth_currency"]),
                 "action": row["auth_action"],
+                "provider_mode": row["auth_provider_mode"],
                 "target_order_id": row["auth_target_order_id"],
                 "issued_at": row["auth_issued_at"],
                 "expires_at": row["auth_expires_at"],
@@ -528,12 +575,18 @@ class ApprovalStore:
                 ),
             })
             if (
-                expected_fingerprint != row["request_fingerprint"]
+                (
+                    expected_fingerprint != row["request_fingerprint"]
+                    and not (
+                        row["provider_mode"] == "MOCK"
+                        and row["request_fingerprint"] == legacy_mock_fingerprint
+                    )
+                )
                 or authorization.issuer_id != self.trusted_issuer_id
                 or authorization.approval_id != approval_id
                 or authorization.approval_reason_codes != tuple(json.loads(row["reason_codes"]))
                 or authorization.status not in {"issued", "consumed"}
-                or not authorization.binds_to(intent)
+                or not authorization.binds_to(intent, row["provider_mode"])
                 or row["auth_principal_id"] != context.principal_id
                 or row["auth_scope_id"] != context.scope_id
             ):
@@ -645,6 +698,8 @@ class ApprovalStore:
             if row is None:
                 raise ValueError("unknown approval")
             record = self._row_to_approval(row)
+            if record.provider_mode == "LIVE":
+                raise ValueError("LIVE approvals are disabled")
             if not hmac.compare_digest(request_fingerprint, record.request_fingerprint):
                 raise ValueError("approval request fingerprint mismatch")
             if record.status == "APPROVED":
@@ -665,6 +720,7 @@ class ApprovalStore:
                 merchant_id=record.merchant_id,
                 money=Money(amount=record.amount_text, currency=record.currency),
                 action=record.action,
+                provider_mode=record.provider_mode,
                 target_order_id=record.target_order_id,
                 issued_at=now,
                 expires_at=record.expires_at,
@@ -678,7 +734,7 @@ class ApprovalStore:
             ).fetchone()
             if existing is None:
                 conn.execute(
-                    "INSERT INTO authorizations(authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin,approval_id,approval_reason_codes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO authorizations(authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,amount_text,currency,action,provider_mode,target_order_id,issued_at,expires_at,status,closed_at,record_origin,approval_id,approval_reason_codes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         auth.authorization_id,
                         auth.issuer_id,
@@ -690,6 +746,7 @@ class ApprovalStore:
                         str(auth.money.amount),
                         auth.money.currency,
                         auth.action,
+                        auth.provider_mode,
                         auth.target_order_id,
                         auth.issued_at.isoformat(),
                         auth.expires_at.isoformat(),
@@ -710,6 +767,7 @@ class ApprovalStore:
                     "merchant_id": existing["merchant_id"],
                     "money": Money(amount=existing["amount_text"], currency=existing["currency"]),
                     "action": existing["action"],
+                    "provider_mode": existing["provider_mode"],
                     "target_order_id": existing["target_order_id"],
                     "issued_at": existing["issued_at"],
                     "expires_at": existing["expires_at"],
@@ -730,8 +788,9 @@ class ApprovalStore:
                 if (
                     existing_authorization.issuer_id != self.trusted_issuer_id
                     or existing_authorization.status != "issued"
+                    or existing_authorization.provider_mode != record.provider_mode
                     or existing_authorization.approval_id not in {None, approval_id}
-                    or not existing_authorization.binds_to(intent_snapshot)
+                    or not existing_authorization.binds_to(intent_snapshot, record.provider_mode)
                 ):
                     raise ValueError("existing authorization does not match approval")
                 conn.execute(
@@ -837,6 +896,18 @@ def _require_approver_secret(configured: str | None = None) -> str:
     return value
 
 
+def _environment_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true"}:
+        return True
+    if normalized in {"0", "false"}:
+        return False
+    raise RuntimeError(f"{name} must be set to true or false")
+
+
 def _require_bearer(request: Request, configured: str | None = None) -> None:
     secret = _require_approver_secret(configured)
     header = request.headers.get("Authorization", "")
@@ -864,12 +935,46 @@ def create_app(
     demo_mode: bool = False,
     ttl_seconds: int = 3600,
     host: str = "127.0.0.1",
+    public_demo_mode: bool | None = None,
+    evaluator_db_path: str | Path | None = None,
 ) -> FastAPI:
+    if public_demo_mode is None:
+        public_demo_mode = _environment_flag("AGENTSENTINEL_PUBLIC_DEMO")
+    elif type(public_demo_mode) is not bool:
+        raise TypeError("public_demo_mode must be a boolean")
+    secure_cookies = _environment_flag("AGENTSENTINEL_SECURE_COOKIES")
+    if public_demo_mode and not secure_cookies:
+        raise RuntimeError("secure cookies must be enabled in public demo mode")
+    demo_mode = demo_mode or public_demo_mode
     db_path = Path(db_path or os.environ.get("APPROVAL_DB_PATH", "data/paypal_sandbox/gateway_demo.sqlite"))
     db_path.parent.mkdir(parents=True, exist_ok=True)
     store = ApprovalStore(db_path, ttl_seconds=ttl_seconds)
-    app = FastAPI(title="AgentSentinel approval service", docs_url="/docs", redoc_url=None)
+    app = FastAPI(
+        title="AgentSentinel mock-only evaluator" if public_demo_mode else "AgentSentinel approval service",
+        docs_url=None if public_demo_mode else "/docs",
+        openapi_url=None if public_demo_mode else "/openapi.json",
+        redoc_url=None,
+    )
     app.state.approval_store = store
+    app.state.public_demo_mode = public_demo_mode
+
+    @app.middleware("http")
+    async def disable_public_demo_writes(request: Request, call_next: Any) -> Any:
+        if public_demo_mode and request.method == "GET" and request.url.path in {
+            "/dashboard/login",
+            "/dashboard/demo",
+        }:
+            return RedirectResponse("/evaluator", status_code=status.HTTP_303_SEE_OTHER)
+        if public_demo_mode and request.method not in {"GET", "HEAD"} and not (
+            request.method == "POST"
+            and request.url.path == "/evaluator/executions"
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "mutations are disabled in public demo mode"},
+            )
+        return await call_next(request)
+
     from fastapi.staticfiles import StaticFiles
 
     from agentsentinel.dashboard import create_dashboard_router
@@ -888,8 +993,31 @@ def create_app(
             telemetry_db_path=Path(telemetry_db_path) if telemetry_db_path else None,
             failures_path=Path(failures_path) if failures_path else None,
             demo_mode=demo_mode,
+            public_demo_mode=public_demo_mode,
+            secure_cookies=secure_cookies,
         )
     )
+
+    if public_demo_mode:
+        from agentsentinel.evaluator import (
+            EvaluatorExecutionStore,
+            create_evaluator_router,
+        )
+
+        scenario_store = EvaluatorExecutionStore(
+            evaluator_db_path
+            or os.environ.get(
+                "AGENTSENTINEL_EVALUATOR_DB_PATH",
+                str(db_path.parent / "evaluator.sqlite"),
+            )
+        )
+        app.state.evaluator_store = scenario_store
+        app.include_router(create_evaluator_router(scenario_store))
+
+    @app.get("/", include_in_schema=False)
+    def home() -> RedirectResponse:
+        path = "/evaluator" if public_demo_mode else "/dashboard/login"
+        return RedirectResponse(path, status_code=status.HTTP_303_SEE_OTHER)
 
     @app.get("/health")
     def health() -> dict[str, str]:

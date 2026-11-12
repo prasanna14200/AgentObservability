@@ -145,7 +145,8 @@ def test_issuer_allows_disabled_switch_after_local_confirmation(tmp_path, monkey
         expected_intent.operation_id,
     )
     assert issued is not None
-    assert issued.binds_to(expected_intent)
+    assert issued.provider_mode == "SANDBOX"
+    assert issued.binds_to(expected_intent, "SANDBOX")
     assert (issued.expires_at - issued.issued_at).total_seconds() == 600
     assert capsys.readouterr().out.endswith(
         "Bound, expiring demo authorization issued for the operation.\n"

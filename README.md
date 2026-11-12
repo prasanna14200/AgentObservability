@@ -146,6 +146,22 @@ it exits before creating demo data or starting a service. The authenticated
 `/dashboard/demo` page is a separate synthetic walkthrough and does not seed
 the persisted dashboard. See the [demo runbook](docs/DEMO_RUNBOOK.md).
 
+## Public mock-only evaluator
+
+The optional Render profile serves `/evaluator`, where visitors can run three
+fixed synthetic scenarios and inspect the resulting request ID, mock tool-call
+timeline, existing loop-detector output, deterministic tool-permission
+decision, and stored audit events. The flow uses AgentSentinel's trace
+validation and existing feature/rule pipeline; its only tool implementations
+return fixed in-process mock data. It cannot reach PayPal or accept arbitrary
+tools, operations, payment instructions, or credentials. Only the evaluator's
+scenario POST is public; operator and approval routes remain protected.
+
+The evaluator's SQLite execution history is ephemeral and may disappear on
+restart, redeploy, or Free-tier spin-down. Deployment is prepared but not
+published or deployed. See [Render mock-only evaluator instructions](docs/RENDER_DEPLOYMENT.md)
+before creating the free service.
+
 ## Optional local Ollama experiment
 
 This experiment requires Ollama and the named model to already be installed.
@@ -181,6 +197,9 @@ independently verified through read-only order and capture GETs. See the
 
 ## Reproducibility and limitations
 
+- [Render mock-only evaluator preparation](docs/RENDER_DEPLOYMENT.md) —
+  configuration is prepared but not deployed; it is not a production or live
+  PayPal service.
 - [Demo runbook](docs/DEMO_RUNBOOK.md)
 - [Master Phase 0–29 reconciliation and feature audit](docs/ROADMAP_RECONCILIATION.md)
 - [Security threat model](docs/SECURITY_THREAT_MODEL.md)

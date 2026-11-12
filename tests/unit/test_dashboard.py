@@ -102,6 +102,57 @@ def test_unauthenticated_dashboard_access_is_rejected(tmp_path):
     assert client.get("/approvals").status_code == 401
 
 
+def test_public_demo_mode_exposes_only_bounded_synthetic_evaluator(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTSENTINEL_PUBLIC_DEMO", "true")
+    monkeypatch.setenv("AGENTSENTINEL_SECURE_COOKIES", "true")
+    for name in (
+        "PAYPAL_ENVIRONMENT",
+        "PAYPAL_CLIENT_ID",
+        "PAYPAL_CLIENT_SECRET",
+        "PAYPAL_MERCHANT_ID",
+        "PAYPAL_ACCESS_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    database_path = tmp_path / "fresh-public-demo.sqlite"
+    evaluator_db_path = tmp_path / "fresh-evaluator.sqlite"
+    app = create_app(
+        db_path=database_path,
+        telemetry_db_path=tmp_path / "missing-telemetry.sqlite",
+        approver_secret=APPROVER_SECRET,
+        evaluator_db_path=evaluator_db_path,
+    )
+    client = TestClient(app)
+
+    home = client.get("/", follow_redirects=False)
+    legacy_demo = client.get("/dashboard/demo", follow_redirects=False)
+    evaluator = client.get("/evaluator")
+
+    assert database_path.is_file()
+    assert evaluator_db_path.is_file()
+    assert home.status_code == 303
+    assert home.headers["location"] == "/evaluator"
+    assert legacy_demo.status_code == 303
+    assert legacy_demo.headers["location"] == "/evaluator"
+    assert evaluator.status_code == 200
+    assert "Synthetic demonstration — no real payments or PayPal actions." in evaluator.text
+    assert "Run Scenario" in evaluator.text
+    assert client.get("/health").status_code == 200
+    assert client.get("/ready").status_code == 200
+
+    assert client.get("/dashboard").status_code == 401
+    assert client.get("/dashboard/traces").status_code == 401
+    assert client.get("/dashboard/login", follow_redirects=False).headers["location"] == "/evaluator"
+    assert client.get("/approvals").status_code == 401
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+    assert client.post("/dashboard/login").status_code == 403
+    assert client.post("/dashboard/killswitch").status_code == 403
+    assert client.post("/approvals/unknown/approve").status_code == 403
+    assert client.post("/killswitch", json={"enabled": False}).status_code == 403
+    assert client.post("/evaluator/anything", json={}).status_code == 403
+
+
 def test_dashboard_operator_login_sets_role_and_local_cookie_attributes(tmp_path):
     client = TestClient(make_app(tmp_path))
     login = client.get("/dashboard/login")
@@ -128,6 +179,32 @@ def test_dashboard_operator_login_sets_role_and_local_cookie_attributes(tmp_path
     assert dashboard.status_code == 200
     assert "Sign out (approver)" in dashboard.text
     assert APPROVER_SECRET not in response.text + dashboard.text
+
+
+def test_secure_cookie_setting_marks_dashboard_session_and_csrf_cookies(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("AGENTSENTINEL_SECURE_COOKIES", "true")
+    client = TestClient(make_app(tmp_path), base_url="https://testserver")
+    login = client.get("/dashboard/login")
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', login.text).group(1)
+
+    response = client.post(
+        "/dashboard/login",
+        data={"csrf_token": csrf, "credential": APPROVER_SECRET},
+        follow_redirects=False,
+    )
+    cookie_headers = response.headers.get_list("set-cookie")
+    session_cookie = next(
+        value for value in cookie_headers if value.startswith("agentsentinel_session=")
+    )
+    csrf_cookie = next(
+        value for value in cookie_headers if value.startswith("csrf_token=")
+    )
+
+    assert response.status_code == 303
+    assert "Secure" in session_cookie
+    assert "Secure" in csrf_cookie
 
 
 @pytest.mark.parametrize("invalid_secret", [None, "too-short"])

@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: agentsentinel-mock-evaluator
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /ready
+    autoDeploy: false
+    envVars:
+      - key: APPROVER_SECRET
+        generateValue: true
+      - key: APPROVAL_DB_PATH
+        value: /tmp/agentsentinel/approval.sqlite
+      - key: AGENTSENTINEL_EVALUATOR_DB_PATH
+        value: /tmp/agentsentinel/evaluator.sqlite
+      - key: AGENTSENTINEL_PUBLIC_DEMO
+        value: "true"
+      - key: AGENTSENTINEL_SECURE_COOKIES
+        value: "true"

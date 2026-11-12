@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,8 +17,112 @@ from agentsentinel.paypal_sandbox import (  # noqa: E402
     PayPalSandboxClient, SandboxConfig, SandboxError, UncertainOutcome,
     amount_usd, read_local_env, request_id,
 )
+from agentsentinel.sandbox_evidence import (  # noqa: E402
+    EvidenceStoreError,
+    SandboxReconciliationEvidenceStore,
+)
 
 JOURNAL = ROOT / "data" / "paypal_sandbox" / "operations.json"
+DEFAULT_PAYMENT_DB = "data/paypal_sandbox/gateway_demo.sqlite"
+
+
+def _application_database_path() -> Path:
+    return Path(os.environ.get("APPROVAL_DB_PATH", DEFAULT_PAYMENT_DB))
+
+
+def _reconcile_manual_operation(
+    *,
+    client: PayPalSandboxClient,
+    config: SandboxConfig,
+    evidence: SandboxReconciliationEvidenceStore,
+    operation_id: str,
+    journal_record: dict,
+) -> dict[str, str | None]:
+    attempted_at = datetime.now(timezone.utc)
+    order_id = journal_record.get("order_id")
+    amount = journal_record.get("amount")
+    if not isinstance(order_id, str) or not isinstance(amount, str):
+        raise SandboxError("Sandbox journal entry is incomplete")
+
+    try:
+        order = client.get_order(order_id)
+    except UncertainOutcome:
+        error_code = "PROVIDER_UNAVAILABLE"
+    except (SandboxError, OSError, TimeoutError, ConnectionError, ValueError):
+        error_code = "PROVIDER_RESPONSE_INVALID"
+    else:
+        if (
+            order.get("order_id") != order_id
+            or order.get("amount") != amount
+            or order.get("currency") != "USD"
+            or order.get("merchant_id") != config.merchant_id
+        ):
+            error_code = "BINDING_MISMATCH"
+        else:
+            capture_id = order.get("capture_id")
+            capture = None
+            if capture_id is not None:
+                try:
+                    capture = client.get_capture(capture_id)
+                except UncertainOutcome:
+                    error_code = "PROVIDER_UNAVAILABLE"
+                except (SandboxError, OSError, TimeoutError, ConnectionError, ValueError):
+                    error_code = "PROVIDER_RESPONSE_INVALID"
+                else:
+                    if (
+                        capture.get("capture_id") != capture_id
+                        or capture.get("related_order_id") != order_id
+                        or capture.get("amount") != amount
+                        or capture.get("currency") != "USD"
+                    ):
+                        error_code = "BINDING_MISMATCH"
+                    else:
+                        error_code = ""
+            else:
+                error_code = ""
+
+            if not error_code:
+                capture_status = capture.get("status") if capture else None
+                order_status = order.get("status")
+                try:
+                    state = evidence.record_verified(
+                        operation_id=operation_id,
+                        merchant_id=config.merchant_id,
+                        amount_text=amount,
+                        provider_order_id=order_id,
+                        order_status=order_status,
+                        provider_capture_id=capture_id,
+                        capture_status=capture_status,
+                        attempted_at=attempted_at,
+                    )
+                except ValueError:
+                    error_code = "PROVIDER_RESPONSE_INVALID"
+                else:
+                    return {
+                        "operation_id": operation_id,
+                        "order_id": order_id,
+                        "order_status": order_status,
+                        "capture_id": capture_id,
+                        "capture_status": capture_status,
+                        "status": state,
+                    }
+
+    evidence.record_error(
+        operation_id=operation_id,
+        merchant_id=config.merchant_id,
+        amount_text=amount,
+        provider_order_id=order_id,
+        error_code=error_code,
+        attempted_at=attempted_at,
+    )
+    return {
+        "operation_id": operation_id,
+        "order_id": order_id,
+        "order_status": None,
+        "capture_id": None,
+        "capture_status": None,
+        "status": "RECONCILIATION_ERROR",
+    }
 
 
 def load_journal() -> dict:
@@ -99,16 +205,23 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"order_id": order_id, "capture_id": result["capture_id"],
                               "capture_status": result["capture_status"]}))
         else:  # reconcile
-            order = client.get_order(order_id)
-            capture = client.get_capture(order["capture_id"]) if order["capture_id"] else None
-            print(json.dumps({"order_id": order_id, "order_status": order["status"],
-                              "capture_id": order["capture_id"],
-                              "capture_status": capture["status"] if capture else None}))
+            evidence = SandboxReconciliationEvidenceStore(_application_database_path())
+            result = _reconcile_manual_operation(
+                client=client,
+                config=config,
+                evidence=evidence,
+                operation_id=args.operation_id,
+                journal_record=original,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result["status"] != "RECONCILIATION_ERROR" else 2
         return 0
-    except (SandboxError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
+    except (EvidenceStoreError, SandboxError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
         # Only locally defined, sanitized errors should reach this output.
         if isinstance(exc, (OSError, KeyError, json.JSONDecodeError)):
             print("Local operation journal error; inspect its path without sharing contents", file=sys.stderr)
+        elif isinstance(exc, EvidenceStoreError):
+            print("Sandbox reconciliation evidence could not be persisted.", file=sys.stderr)
         else:
             print(str(exc), file=sys.stderr)
         return 2

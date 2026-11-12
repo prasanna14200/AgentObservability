@@ -68,7 +68,9 @@ class TestAuthorizationStore:
                 raise TimeoutError("hidden consumption detail")
             record = self.record
             if (not self.claim_allowed or self._consumed or context != CONTEXT or record is None
-                    or decision.outcome != "ALLOW" or not record.binds_to(request)
+                    or decision.outcome != "ALLOW"
+                    or decision.provider_mode != "MOCK"
+                    or not record.binds_to(request, decision.provider_mode)
                     or record.status != "issued" or not record.issued_at <= NOW < record.expires_at):
                 return False
             self._consumed = True

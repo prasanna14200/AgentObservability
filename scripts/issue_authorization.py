@@ -51,7 +51,8 @@ def issue_after_local_confirmation(db: Path, intent: PaymentIntent) -> PaymentAu
         authorization_id="authorization_" + digest, issuer_id=DEMO_ISSUER,
         scope_id=DEMO_SCOPE, intent_id=intent.intent_id,
         operation_id=intent.operation_id, merchant_id=intent.merchant_id,
-        money=intent.money, action=intent.action, target_order_id=intent.target_order_id,
+        money=intent.money, action=intent.action, provider_mode="SANDBOX",
+        target_order_id=intent.target_order_id,
         issued_at=now, expires_at=now + timedelta(minutes=10),
         status="issued", record_origin="application_issued",
     )
@@ -70,11 +71,11 @@ def issue_after_local_confirmation(db: Path, intent: PaymentIntent) -> PaymentAu
             raise RuntimeError("authorization issuance blocked by kill switch")
         conn.execute("""INSERT INTO authorizations
             (authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,
-             amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             amount_text,currency,action,provider_mode,target_order_id,issued_at,expires_at,status,closed_at,record_origin)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (record.authorization_id, record.issuer_id, DEMO_PRINCIPAL, record.scope_id,
              record.intent_id, record.operation_id, record.merchant_id, str(record.money.amount),
-             record.money.currency, record.action, record.target_order_id,
+             record.money.currency, record.action, record.provider_mode, record.target_order_id,
              record.issued_at.isoformat(), record.expires_at.isoformat(), record.status,
              None, record.record_origin))
         conn.execute("COMMIT")

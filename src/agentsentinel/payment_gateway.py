@@ -14,6 +14,7 @@ from typing import Literal, Protocol
 from pydantic import field_validator
 
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy, PolicyDecision, PolicyAudit, POLICY_VERSION
+from agentsentinel.payment_provider import ProviderMode, ProviderModeConfig
 from agentsentinel.schema.payment import PaymentIntent, PaymentModel, _check_id
 from agentsentinel.schema.payment_telemetry import PaymentTelemetryEvent
 from agentsentinel.observability.payment_events import (
@@ -29,6 +30,7 @@ GatewayReason = Literal[
     "OPERATION_FINALIZATION_FAILED", "RECONCILIATION_REQUIRED", "VERIFIED_COMPLETED", "VERIFIED_NO_PAYMENT",
     "KILL_SWITCH_ACTIVE", "RECOVERY_NOT_DISPATCHED", "DISPATCH_INTENT_FAILED",
     "PROVIDER_CONFIRMED_FAILURE",
+    "LIVE_EXECUTION_DISABLED",
 ]
 
 
@@ -36,6 +38,7 @@ class GatewayResult(PaymentModel):
     """Safe response. A missing decision means evaluation did not finish."""
 
     operation_id: str
+    provider_mode: ProviderMode = "MOCK"
     decision: PolicyDecision | None
     status: GatewayStatus
     reason_codes: tuple[GatewayReason, ...]
@@ -86,6 +89,14 @@ class TestOnlyAdapter(ABC):
 
 class SandboxOnlyAdapter(ABC):
     """Explicit manual Sandbox adapter marker; never grants agent access to credentials."""
+
+    @abstractmethod
+    def execute(self, intent: PaymentIntent) -> AdapterOutcome:
+        ...
+
+
+class LiveOnlyAdapter(ABC):
+    """Reserved adapter boundary; LIVE execution remains unconditionally disabled."""
 
     @abstractmethod
     def execute(self, intent: PaymentIntent) -> AdapterOutcome:
@@ -166,8 +177,16 @@ class InMemoryOperationStore:
             return True
 
 
-def _fingerprint(intent: PaymentIntent, context: AuthenticatedScope) -> str:
+def _fingerprint(
+    intent: PaymentIntent, context: AuthenticatedScope, provider_mode: ProviderMode = "MOCK"
+) -> str:
     # Digest comparison prevents returning another request's existing result.
+    material = intent.model_dump_json() + "|" + context.model_dump_json() + "|" + provider_mode
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _legacy_fingerprint(intent: PaymentIntent, context: AuthenticatedScope) -> str:
+    """Pre-provider-mode fingerprint retained only to read existing MOCK operations."""
     material = intent.model_dump_json() + "|" + context.model_dump_json()
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -184,12 +203,18 @@ class PaymentGateway:
         *, enable_sandbox_execution: bool = False,
         kill_switch: object | None = None,
         telemetry_publisher: PaymentTelemetryPublisher | None = None,
+        provider_mode: ProviderModeConfig | None = None,
     ) -> None:
         self._policy = policy
         self._operations = operations
         self._consumer = consumer
         self._adapter = adapter
         self._enable_sandbox_execution = enable_sandbox_execution
+        self._provider_mode = (
+            ProviderModeConfig.from_environment() if provider_mode is None else provider_mode
+        )
+        if not isinstance(self._provider_mode, ProviderModeConfig):
+            raise TypeError("provider_mode must be trusted ProviderModeConfig")
         self._kill_switch = kill_switch
         self._telemetry_publisher = telemetry_publisher
         if kill_switch is not None:
@@ -203,6 +228,18 @@ class PaymentGateway:
                 raise ValueError("kill switch store paths could not be verified") from None
             if len(set(resolved_paths)) != 1:
                 raise ValueError("kill switch and payment stores must use the same SQLite database")
+        if isinstance(adapter, SandboxOnlyAdapter) and self._provider_mode.mode != "SANDBOX":
+            raise ValueError("Sandbox adapter requires explicit SANDBOX provider mode")
+        if isinstance(adapter, LiveOnlyAdapter) and self._provider_mode.mode != "LIVE":
+            raise ValueError("LIVE adapter requires LIVE provider mode")
+        if self._provider_mode.mode == "SANDBOX" and isinstance(adapter, TestOnlyAdapter):
+            raise ValueError("SANDBOX mode cannot use a mock test adapter")
+        if self._provider_mode.mode == "LIVE" and adapter is not None:
+            raise ValueError("LIVE payment execution is disabled")
+
+    @property
+    def provider_mode(self) -> ProviderMode:
+        return self._provider_mode.mode
 
     def submit(
         self, intent: PaymentIntent, context: AuthenticatedScope,
@@ -291,12 +328,16 @@ class PaymentGateway:
         # model_copy/model_construct can bypass Pydantic validators; revalidate untrusted input.
         intent = PaymentIntent.model_validate(intent.model_dump(mode="python"))
         context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
-        fingerprint = _fingerprint(intent, context)
+        provider_mode = self.provider_mode
+        fingerprint = _fingerprint(intent, context, provider_mode)
         try:
             # Durable stores can persist the bounded intent/context fields needed for recovery.
             reserve_intent = getattr(self._operations, "reserve_intent", None)
-            reservation = (reserve_intent(intent, context, fingerprint) if reserve_intent is not None
-                           else self._operations.reserve(intent.operation_id, fingerprint))
+            reservation = (
+                reserve_intent(intent, context, fingerprint, provider_mode)
+                if reserve_intent is not None
+                else self._operations.reserve(intent.operation_id, fingerprint)
+            )
         except Exception:
             return self._result(intent, None, "REJECTED", "OPERATION_RESERVATION_FAILED")
 
@@ -312,6 +353,7 @@ class PaymentGateway:
                     f"{intent.operation_id}:{reservation.guard_reason}".encode("ascii")
                 ).hexdigest()[:24], operation_id=intent.operation_id, outcome="BLOCK",
                 reason_codes=(kind, reservation.guard_reason), policy_version=POLICY_VERSION,
+                provider_mode=self.provider_mode,
                 evaluated_at=datetime.now(timezone.utc),
                 audit_metadata=PolicyAudit(authorization_lookup="skipped"),
             )
@@ -329,12 +371,21 @@ class PaymentGateway:
             return self._block_for_kill_switch(intent, fingerprint)
 
         try:
-            decision = self._policy.evaluate(intent, context, advisory_signals=advisory_signals)
+            decision = self._policy.evaluate(
+                intent,
+                context,
+                advisory_signals=advisory_signals,
+                provider_mode=provider_mode,
+            )
         except Exception:
             return self._finalize(intent, fingerprint, None, "REJECTED", "POLICY_FAILURE")
         self._publish_decision_event(intent, decision, approval_id=approval_id)
         if decision.outcome == "BLOCK":
             return self._finalize(intent, fingerprint, decision, "REJECTED", "POLICY_BLOCK")
+        if provider_mode == "LIVE":
+            return self._finalize(
+                intent, fingerprint, decision, "REJECTED", "LIVE_EXECUTION_DISABLED"
+            )
         if decision.outcome == "REVIEW":
             return self._finalize(intent, fingerprint, decision, "REVIEW_REQUIRED", "POLICY_REVIEW")
 
@@ -342,15 +393,23 @@ class PaymentGateway:
             return self._block_for_kill_switch(intent, fingerprint)
 
         # Real Sandbox execution requires an explicit trusted application opt-in.
-        sandbox_enabled = self._enable_sandbox_execution and isinstance(self._adapter, SandboxOnlyAdapter)
-        if self._adapter is None or not (isinstance(self._adapter, TestOnlyAdapter) or sandbox_enabled):
+        sandbox_enabled = (
+            provider_mode == "SANDBOX"
+            and self._enable_sandbox_execution
+            and isinstance(self._adapter, SandboxOnlyAdapter)
+        )
+        mock_enabled = provider_mode == "MOCK" and isinstance(self._adapter, TestOnlyAdapter)
+        if self._adapter is None or not (mock_enabled or sandbox_enabled):
             return self._finalize(intent, fingerprint, decision, "REJECTED", "EXECUTION_DISABLED")
         try:
             if self._kill_switch is None:
                 consumed = self._consumer.claim(context, intent, decision)
             else:
                 consumed = self._consumer.claim(
-                    context, intent, decision, require_kill_switch=True
+                    context,
+                    intent,
+                    decision,
+                    require_kill_switch=True,
                 )
         except Exception:
             consumed = False
@@ -441,6 +500,7 @@ class PaymentGateway:
             outcome="BLOCK",
             reason_codes=("KILL_SWITCH_ACTIVE",),
             policy_version=POLICY_VERSION,
+            provider_mode=self.provider_mode,
             evaluated_at=datetime.now(timezone.utc),
             audit_metadata=PolicyAudit(authorization_lookup="skipped"),
         )
@@ -491,19 +551,33 @@ class PaymentGateway:
                 outcome="BLOCK",
                 reason_codes=("KILL_SWITCH_ACTIVE",),
                 policy_version=POLICY_VERSION,
+                provider_mode=self.provider_mode,
                 evaluated_at=datetime.now(timezone.utc),
                 audit_metadata=PolicyAudit(authorization_lookup="skipped"),
             )
-        return self._policy.evaluate(
+        decision = self._policy.evaluate(
             intent,
             context,
             advisory_signals=advisory_signals,
             allow_pending_approval=True,
+            provider_mode=self.provider_mode,
+        )
+        if decision.outcome == "BLOCK" or self.provider_mode != "LIVE":
+            return decision
+        return decision.model_copy(
+            update={
+                "outcome": "BLOCK",
+                "reason_codes": ("LIVE_EXECUTION_DISABLED",),
+            }
         )
 
     def record_approval_request(self, intent: PaymentIntent, decision: PolicyDecision) -> None:
         """Persist the review decision after its exact approval record is durable."""
-        if decision.outcome != "REVIEW" or decision.operation_id != intent.operation_id:
+        if (
+            decision.outcome != "REVIEW"
+            or decision.operation_id != intent.operation_id
+            or decision.provider_mode != self.provider_mode
+        ):
             raise ValueError("a matching REVIEW decision is required")
         self._publish_telemetry(
             build_payment_event(
@@ -568,13 +642,16 @@ class PaymentGateway:
             return self._result(intent, decision, "UNCERTAIN", "OPERATION_FINALIZATION_FAILED")
         return result
 
-    @staticmethod
     def _result(
-        intent: PaymentIntent, decision: PolicyDecision | None, status: GatewayStatus, reason: GatewayReason,
+        self, intent: PaymentIntent, decision: PolicyDecision | None, status: GatewayStatus, reason: GatewayReason,
         *, outcome: AdapterOutcome | None = None,
     ) -> GatewayResult:
         return GatewayResult(
-            operation_id=intent.operation_id, decision=decision, status=status, reason_codes=(reason,),
+            operation_id=intent.operation_id,
+            provider_mode=self.provider_mode,
+            decision=decision,
+            status=status,
+            reason_codes=(reason,),
             provider_order_id=outcome.provider_order_id if outcome else None,
             provider_capture_id=outcome.provider_capture_id if outcome else None,
         )
@@ -600,6 +677,7 @@ class ApprovalRequestStore(Protocol):
         context: AuthenticatedScope,
         reason_codes: tuple[str, ...],
         defer_telemetry: bool = False,
+        provider_mode: ProviderMode = "MOCK",
     ) -> object: ...
 
     def publish_approval_requested(self, record: object) -> None: ...
@@ -641,6 +719,7 @@ class TrustedGatewayEntryPoint:
             context=context,
             reason_codes=decision.reason_codes,
             defer_telemetry=True,
+            provider_mode=self._gateway.provider_mode,
         )
         approval_id = str(getattr(record, "approval_id"))
         self._gateway.record_approval_request(intent, decision)

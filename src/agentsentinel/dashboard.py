@@ -12,13 +12,14 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Literal
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from agentsentinel.data.payment_synth_traces import generate_payment_traces
@@ -129,6 +130,7 @@ def _render(
     context: dict[str, Any],
     *,
     status_code: int = 200,
+    secure_cookies: bool = False,
 ) -> HTMLResponse:
     csrf = _csrf_token(request)
     response = _TEMPLATES.TemplateResponse(
@@ -138,7 +140,8 @@ def _render(
         status_code=status_code,
         headers={
             "Cache-Control": "no-store",
-            "Content-Security-Policy": "default-src 'none'; style-src 'self'; form-action 'self'; "
+            "Content-Security-Policy": "default-src 'none'; style-src 'self'; script-src 'self'; "
+            "connect-src 'self'; form-action 'self'; "
             "base-uri 'none'; object-src 'none'; frame-ancestors 'none'",
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
@@ -150,7 +153,7 @@ def _render(
         csrf,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=secure_cookies,
         path="/",
     )
     return response
@@ -279,6 +282,125 @@ def _read_operation_count(path: Path) -> int | None:
             return None
         row = conn.execute("SELECT COUNT(*) AS count FROM operations").fetchone()
     return int(row["count"])
+
+
+_TRANSACTION_STATUS = {
+    "RESERVED": "PENDING",
+    "CLAIMED": "PENDING",
+    "REVIEW_REQUIRED": "PENDING",
+    "COMPLETED": "COMPLETED",
+    "REJECTED": "FAILED",
+    "UNCERTAIN": "RECONCILIATION_ERROR",
+}
+_MAX_TRANSACTION_ROWS = 100
+
+
+def _transaction_snapshot(path: Path) -> dict[str, Any]:
+    records: list[dict[str, str]] = []
+    with _read_only(path) as conn:
+        if conn is None:
+            return _build_transaction_snapshot(records)
+
+        if _has_table(conn, "operations"):
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(operations)")}
+            required = {
+                "operation_id", "provider_mode", "merchant_id", "amount_text", "currency",
+                "action", "state", "provider_order_id", "provider_capture_id", "updated_at",
+            }
+            if required <= columns:
+                rows = conn.execute(
+                    """
+                    SELECT operation_id,provider_mode,merchant_id,amount_text,currency,
+                           action,state,provider_order_id,provider_capture_id,updated_at
+                    FROM operations ORDER BY updated_at DESC,operation_id DESC LIMIT ?
+                    """,
+                    (_MAX_TRANSACTION_ROWS,),
+                ).fetchall()
+                for row in rows:
+                    state = _TRANSACTION_STATUS.get(row["state"])
+                    if state is None:
+                        raise ValueError("stored payment operation has an invalid state")
+                    records.append({
+                        "operation_id": str(row["operation_id"]),
+                        "source": "gateway_operation",
+                        "provider_mode": str(row["provider_mode"]),
+                        "merchant_id": str(row["merchant_id"]),
+                        "amount": str(row["amount_text"]),
+                        "currency": str(row["currency"]),
+                        "action": str(row["action"]),
+                        "status": state,
+                        "provider_order_id": str(row["provider_order_id"] or ""),
+                        "provider_capture_id": str(row["provider_capture_id"] or ""),
+                        "provider_order_status": "",
+                        "provider_capture_status": "",
+                        "updated_at": str(row["updated_at"]),
+                    })
+
+        if _has_table(conn, "sandbox_reconciliation_evidence"):
+            rows = conn.execute(
+                """
+                SELECT operation_id,provider_mode,merchant_id,amount_text,currency,
+                       provider_order_id,order_status,provider_capture_id,capture_status,
+                       reconciliation_status,attempted_at
+                FROM sandbox_reconciliation_evidence
+                ORDER BY attempted_at DESC,operation_id DESC LIMIT ?
+                """,
+                (_MAX_TRANSACTION_ROWS,),
+            ).fetchall()
+            for row in rows:
+                state = row["reconciliation_status"]
+                if state not in {"PENDING", "COMPLETED", "FAILED", "RECONCILIATION_ERROR"}:
+                    raise ValueError("stored Sandbox evidence has an invalid state")
+                records.append({
+                    "operation_id": str(row["operation_id"]),
+                    "source": "manual_sandbox_evidence",
+                    "provider_mode": str(row["provider_mode"]),
+                    "merchant_id": str(row["merchant_id"]),
+                    "amount": str(row["amount_text"]),
+                    "currency": str(row["currency"]),
+                    "action": "manual_sandbox_order",
+                    "status": str(state),
+                    "provider_order_id": str(row["provider_order_id"] or ""),
+                    "provider_capture_id": str(row["provider_capture_id"] or ""),
+                    "provider_order_status": str(row["order_status"] or ""),
+                    "provider_capture_status": str(row["capture_status"] or ""),
+                    "updated_at": str(row["attempted_at"]),
+                })
+
+    records.sort(key=lambda item: (item["updated_at"], item["operation_id"]), reverse=True)
+    return _build_transaction_snapshot(records[:_MAX_TRANSACTION_ROWS])
+
+
+def _build_transaction_snapshot(records: list[dict[str, str]]) -> dict[str, Any]:
+    totals: dict[str, Decimal] = {}
+    status_counts = {
+        "PENDING": 0,
+        "COMPLETED": 0,
+        "FAILED": 0,
+        "RECONCILIATION_ERROR": 0,
+    }
+    for record in records:
+        try:
+            amount = Decimal(record["amount"])
+        except (InvalidOperation, ValueError):
+            raise ValueError("stored payment amount is invalid") from None
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("stored payment amount is invalid")
+        currency = record["currency"]
+        totals[currency] = totals.get(currency, Decimal("0")) + amount
+        status_counts[record["status"]] += 1
+    return {
+        "summary": {
+            "transaction_count": len(records),
+            "status_counts": status_counts,
+            "totals_by_currency": {
+                currency: f"{amount:.2f}" for currency, amount in sorted(totals.items())
+            },
+            "scope": f"Latest { _MAX_TRANSACTION_ROWS } persisted records",
+        },
+        "transactions": records,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _read_recent_failures(path: Path, since: datetime) -> int | None:
@@ -730,6 +852,8 @@ def create_dashboard_router(
     telemetry_db_path: Path | None = None,
     failures_path: Path | None = None,
     demo_mode: bool = False,
+    public_demo_mode: bool = False,
+    secure_cookies: bool = False,
 ) -> APIRouter:
     router = APIRouter()
     telemetry_db_path = telemetry_db_path or _TELEMETRY_DB
@@ -745,8 +869,13 @@ def create_dashboard_router(
         return _render(
             request,
             template,
-            {"demo_mode": demo_mode, **context},
+            {
+                "demo_mode": demo_mode,
+                "public_demo_mode": public_demo_mode,
+                **context,
+            },
             status_code=status_code,
+            secure_cookies=secure_cookies,
         )
 
     def authenticated_role(request: Request) -> Literal["viewer", "approver"]:
@@ -789,7 +918,7 @@ def create_dashboard_router(
             _sign_session(role, approver),
             httponly=True,
             samesite="strict",
-            secure=False,
+            secure=secure_cookies,
             max_age=_SESSION_SECONDS,
             path="/",
         )
@@ -798,7 +927,7 @@ def create_dashboard_router(
             form["csrf_token"],
             httponly=True,
             samesite="strict",
-            secure=False,
+            secure=secure_cookies,
             path="/",
         )
         return response
@@ -809,8 +938,18 @@ def create_dashboard_router(
         form = await _form_data(request)
         _require_form_csrf(request, form)
         response = RedirectResponse("/dashboard/login", status_code=status.HTTP_303_SEE_OTHER)
-        response.delete_cookie(_SESSION_COOKIE, path="/", samesite="strict")
-        response.delete_cookie(_CSRF_COOKIE, path="/", samesite="strict")
+        response.delete_cookie(
+            _SESSION_COOKIE,
+            path="/",
+            samesite="strict",
+            secure=secure_cookies,
+        )
+        response.delete_cookie(
+            _CSRF_COOKIE,
+            path="/",
+            samesite="strict",
+            secure=secure_cookies,
+        )
         return response
 
     @router.get("/dashboard", response_class=HTMLResponse)
@@ -824,6 +963,21 @@ def create_dashboard_router(
             role=role,
         )
         return render(request, "dashboard_overview.html", context)
+
+    @router.get("/dashboard/api/transactions")
+    async def dashboard_transactions(request: Request) -> JSONResponse:
+        authenticated_role(request)
+        try:
+            snapshot = _transaction_snapshot(payment_db_path)
+        except (sqlite3.Error, OSError, TypeError, ValueError):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="transaction data unavailable",
+            ) from None
+        return JSONResponse(
+            snapshot,
+            headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
 
     @router.get("/dashboard/traces", response_class=HTMLResponse)
     async def dashboard_traces(
@@ -1076,7 +1230,7 @@ def create_dashboard_router(
 
     @router.get("/dashboard/demo", response_class=HTMLResponse)
     async def dashboard_demo(request: Request) -> HTMLResponse:
-        role = authenticated_role(request)
+        role = "viewer" if public_demo_mode else authenticated_role(request)
         traces = generate_payment_traces(normal_count=70, per_scenario=1)
         by_scenario = {trace.scenario: trace for trace in traces}
         cases = [
@@ -1152,8 +1306,13 @@ def create_dashboard_router(
             {
                 "role": role,
                 "cases": demo_rows,
+                "synthetic_trace_count": len(traces),
                 "demo_audit_status": audit_status,
                 "demo_audit_records": audit.records_checked,
+                "demo_audit_events": [
+                    {"event_type": event.event_type, "timestamp": event.timestamp.isoformat()}
+                    for event in kill_events
+                ],
                 "seed": 20261028,
                 "unsupported": "A real authorization-backed mock payment is intentionally not executed in this walkthrough. The normal row is a synthetic completed-event illustration only.",
             },

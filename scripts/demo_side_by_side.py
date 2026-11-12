@@ -21,6 +21,7 @@ from agentsentinel.payment_gateway import (  # noqa: E402
     AdapterOutcome, PaymentGateway, TestOnlyAdapter, TrustedGatewayEntryPoint,
 )
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy  # noqa: E402
+from agentsentinel.payment_provider import ProviderModeConfig  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore  # noqa: E402
 from agentsentinel.purchase_agent.contracts import (  # noqa: E402
     Proposal, PurchaseRequest, ToolResult, load_catalog,
@@ -109,7 +110,13 @@ def _seed_trusted_demo_authorization(db: Path, run_id: str) -> None:
 
 def protected_client(db: Path, *, run_id: str, adapter: MockPayPalAdapter) -> GatewayPurchaseClient:
     store = SQLitePaymentStore(db, trusted_issuer_id=DEMO_ISSUER)
-    gateway = PaymentGateway(PaymentPolicy(store), store, store, adapter)
+    gateway = PaymentGateway(
+        PaymentPolicy(store),
+        store,
+        store,
+        adapter,
+        provider_mode=ProviderModeConfig.mock(),
+    )
     client = GatewayPurchaseClient(TrustedGatewayEntryPoint(gateway, DemoContextProvider()),
                                    scope_id=DEMO_CONTEXT.scope_id, run_id=run_id)
     _seed_trusted_demo_authorization(db, run_id)

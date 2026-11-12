@@ -11,6 +11,7 @@ from typing import Callable, Literal, Protocol
 from pydantic import AwareDatetime, field_validator
 
 from agentsentinel.schema.payment import PaymentAuthorization, PaymentIntent, PaymentModel, _check_id
+from agentsentinel.payment_provider import ProviderMode
 
 POLICY_VERSION = "payment-policy-v1"
 MIN_USD = Decimal("0.01")
@@ -25,12 +26,14 @@ ReasonCode = Literal[
     "AUTHORIZATION_MERCHANT_MISMATCH", "AUTHORIZATION_AMOUNT_MISMATCH",
     "AUTHORIZATION_CURRENCY_MISMATCH", "AUTHORIZATION_ACTION_MISMATCH",
     "AUTHORIZATION_TARGET_MISMATCH", "AUTHORIZATION_INACTIVE",
+    "AUTHORIZATION_PROVIDER_MODE_MISMATCH",
     "AUTHORIZATION_NOT_YET_VALID", "AUTHORIZATION_EXPIRED",
     "REVIEW_ADVISORY_SIGNAL",
     "HUMAN_APPROVAL_ACCEPTED",
     "LOOP_LIMIT_EXCEEDED", "OPERATION_LOOP_LIMIT", "TRACE_LOOP_LIMIT",
     "BUDGET_EXCEEDED", "DAILY_BUDGET_LIMIT", "MERCHANT_BUDGET_LIMIT",
     "KILL_SWITCH_ACTIVE",
+    "LIVE_EXECUTION_DISABLED",
 ]
 
 
@@ -70,6 +73,7 @@ class PolicyDecision(PaymentModel):
     outcome: Outcome
     reason_codes: tuple[ReasonCode, ...]
     policy_version: Literal["payment-policy-v1"]
+    provider_mode: ProviderMode = "MOCK"
     evaluated_at: AwareDatetime
     audit_metadata: PolicyAudit
 
@@ -118,6 +122,7 @@ class PaymentPolicy:
         self, intent: PaymentIntent, context: AuthenticatedScope,
         *, advisory_signals: tuple[Literal["request_review"], ...] = (),
         allow_pending_approval: bool = False,
+        provider_mode: ProviderMode = "MOCK",
     ) -> PolicyDecision:
         """No authorization payload parameter; caller must control context and repository."""
         if not isinstance(intent, PaymentIntent) or not isinstance(context, AuthenticatedScope):
@@ -162,7 +167,15 @@ class PaymentPolicy:
                 if not (allow_pending_approval and review_requested):
                     hard.append("AUTHORIZATION_MISSING")
             elif authorization is not None:
-                hard.extend(self._check_authorization(authorization, intent, context, now))
+                hard.extend(
+                    self._check_authorization(
+                        authorization,
+                        intent,
+                        context,
+                        now,
+                        provider_mode,
+                    )
+                )
 
         if hard:
             outcome: Outcome = "BLOCK"
@@ -194,7 +207,7 @@ class PaymentPolicy:
         # Stable correlation identifier, not a bearer token or replay guard.
         material = (
             f"{POLICY_VERSION}|{intent.operation_id}|{intent.intent_id}|{context.scope_id}|"
-            f"{context.principal_id}|{now.isoformat()}|{outcome}|{','.join(reasons)}"
+            f"{context.principal_id}|{provider_mode}|{now.isoformat()}|{outcome}|{','.join(reasons)}"
         )
         decision_id = "decision_" + hashlib.sha256(material.encode("ascii")).hexdigest()[:24]
         return PolicyDecision(
@@ -203,6 +216,7 @@ class PaymentPolicy:
             outcome=outcome,
             reason_codes=reasons,
             policy_version=POLICY_VERSION,
+            provider_mode=provider_mode,
             evaluated_at=now,
             audit_metadata=PolicyAudit(
                 authorization_lookup=lookup,
@@ -212,9 +226,15 @@ class PaymentPolicy:
 
     @staticmethod
     def _check_authorization(
-        record: PaymentAuthorization, intent: PaymentIntent, context: AuthenticatedScope, now: datetime
+        record: PaymentAuthorization,
+        intent: PaymentIntent,
+        context: AuthenticatedScope,
+        now: datetime,
+        provider_mode: ProviderMode = "MOCK",
     ) -> list[ReasonCode]:
         issues: list[ReasonCode] = []
+        if record.provider_mode != provider_mode:
+            issues.append("AUTHORIZATION_PROVIDER_MODE_MISMATCH")
         if record.intent_id != intent.intent_id:
             issues.append("AUTHORIZATION_INTENT_MISMATCH")
         if record.operation_id != intent.operation_id:

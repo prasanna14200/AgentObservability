@@ -29,6 +29,7 @@ from agentsentinel.observability.payment_audit import PaymentAuditChain  # noqa:
 from agentsentinel.observability.payment_events import PaymentTelemetryPublisher, build_payment_event  # noqa: E402
 from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoint  # noqa: E402
 from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
+from agentsentinel.payment_provider import ProviderModeConfig  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SafetyLimits  # noqa: E402
 from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig  # noqa: E402
@@ -59,7 +60,7 @@ def guarded_setup(path: Path, limits: SafetyLimits, *, timeout: bool = False):
     spy = SpyTransport(timeout_post=timeout)
     client = PayPalSandboxClient(SandboxConfig("fake_client", "fake_secret", MERCHANT), spy)
     gateway = PaymentGateway(PaymentPolicy(store), store, store, SandboxPaymentAdapter(client),
-                             enable_sandbox_execution=True)
+                             enable_sandbox_execution=True, provider_mode=ProviderModeConfig.sandbox())
     return db, store, spy, gateway
 
 
@@ -156,7 +157,14 @@ def run_case(name: str) -> Row:
             approval_store.set_kill_switch(enabled=False, actor_role="system")
             approval = approval_store.create_approval(intent=intent, context=CONTEXT)
             approval_store.set_kill_switch(enabled=True, actor_role="approver", reason_code="KILL_SWITCH_ENABLED")
-            gateway = PaymentGateway(PaymentPolicy(store), store, store, None, kill_switch=approval_store)
+            gateway = PaymentGateway(
+                PaymentPolicy(store),
+                store,
+                store,
+                None,
+                kill_switch=approval_store,
+                provider_mode=ProviderModeConfig.mock(),
+            )
             result = gateway.submit(intent, CONTEXT)
             expected = "BLOCK"
             actual = "BLOCK"
@@ -203,6 +211,7 @@ def run_case(name: str) -> Row:
                 PaymentPolicy(store), store, store,
                 SandboxPaymentAdapter(PayPalSandboxClient(SandboxConfig("fake_client", "fake_secret", MERCHANT), spy)),
                 enable_sandbox_execution=True,
+                provider_mode=ProviderModeConfig.sandbox(),
                 telemetry_publisher=PaymentTelemetryPublisher(FailingCollector()),
             )
             result = failing_gateway.submit(intent, CONTEXT)

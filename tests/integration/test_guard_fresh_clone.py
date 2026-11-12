@@ -45,8 +45,12 @@ class Repository:
         return record
 
 class Consumer:
-    def claim(self, caller, request, decision):
-        return record.binds_to(request) and decision.outcome == "ALLOW"
+    def claim(self, caller, request, decision, *, require_kill_switch=False, provider_mode="MOCK"):
+        return (
+            record.binds_to(request, provider_mode)
+            and decision.provider_mode == provider_mode
+            and decision.outcome == "ALLOW"
+        )
 
 class Adapter(TestOnlyAdapter):
     def execute(self, request):

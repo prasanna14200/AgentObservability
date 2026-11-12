@@ -42,8 +42,11 @@ class SandboxStatusVerifier(SandboxReadOnlyVerifier):
         self._client = client
 
     def verify(self, snapshot: ReconciliationSnapshot) -> VerifiedOutcome:
+        if snapshot.provider_mode != "SANDBOX":
+            raise SandboxError("Sandbox reconciliation cannot verify another provider mode")
         order_id = snapshot.provider_order_id or snapshot.target_order_id
-        common = dict(operation_id=snapshot.operation_id, attempt_id=snapshot.attempt_id,
+        common = dict(operation_id=snapshot.operation_id, provider_mode=snapshot.provider_mode,
+                      attempt_id=snapshot.attempt_id,
                       idempotency_key=snapshot.idempotency_key, verified_at=datetime.now(timezone.utc))
         if order_id is None:
             # PayPal Orders GET cannot locate an unknown create-order ID from our local key.

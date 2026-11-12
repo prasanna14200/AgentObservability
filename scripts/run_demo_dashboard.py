@@ -49,6 +49,7 @@ def _load_demo_dependencies() -> None:
             TrustedGatewayEntryPoint,
         )
         from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy  # noqa: E402
+        from agentsentinel.payment_provider import ProviderModeConfig  # noqa: E402
         from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter  # noqa: E402
         from agentsentinel.payment_sqlite import SQLitePaymentStore  # noqa: E402
         from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig  # noqa: E402
@@ -77,6 +78,7 @@ def _load_demo_dependencies() -> None:
             "PaymentPolicy": PaymentPolicy,
             "PaymentTelemetryPublisher": PaymentTelemetryPublisher,
             "PayPalSandboxClient": PayPalSandboxClient,
+            "ProviderModeConfig": ProviderModeConfig,
             "SandboxConfig": SandboxConfig,
             "SandboxPaymentAdapter": SandboxPaymentAdapter,
             "SQLitePaymentStore": SQLitePaymentStore,
@@ -162,11 +164,13 @@ def _intent(
 def _approve_for_demo(
     approvals: ApprovalStore,
     intent: PaymentIntent,
+    provider_mode: str = "MOCK",
 ) -> ApprovalRecord:
     record = approvals.create_approval(
         intent=intent,
         context=DEMO_CONTEXT,
         reason_codes=("DEMO_SEEDED_AUTHORIZATION",),
+        provider_mode=provider_mode,
     )
     return approvals.approve_approval(
         record.approval_id,
@@ -327,6 +331,7 @@ def seed_demo_data(*, reset: bool = False) -> DemoSeed:
         mock_adapter,
         kill_switch=approvals,
         telemetry_publisher=publisher,
+        provider_mode=ProviderModeConfig.mock(),
     )
     entrypoint = TrustedGatewayEntryPoint(gateway, DemoContextProvider())
     executor = ApprovedPaymentExecutor(entrypoint, approvals)
@@ -398,7 +403,9 @@ def seed_demo_data(*, reset: bool = False) -> DemoSeed:
     )
 
     uncertain_intent = _intent("uncertain", amount="2.00")
-    uncertain_approval = _approve_for_demo(approvals, uncertain_intent)
+    uncertain_approval = _approve_for_demo(
+        approvals, uncertain_intent, provider_mode="SANDBOX"
+    )
     spy_transport = SpyTransport(timeout_post=True)
     mock_client = PayPalSandboxClient(
         SandboxConfig("mock_demo_client", "mock_demo_secret", MERCHANT),
@@ -414,6 +421,7 @@ def seed_demo_data(*, reset: bool = False) -> DemoSeed:
         kill_switch=approvals,
         telemetry_publisher=publisher,
         enable_sandbox_execution=True,
+        provider_mode=ProviderModeConfig.sandbox(),
     )
     uncertain_executor = ApprovedPaymentExecutor(
         TrustedGatewayEntryPoint(uncertain_gateway, DemoContextProvider()),

@@ -8,6 +8,7 @@ import sqlite3
 from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoint, _fingerprint
 from agentsentinel.payment_policy import PaymentPolicy
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter
+from agentsentinel.payment_provider import ProviderModeConfig
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SafetyLimits
 from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig
 
@@ -22,7 +23,7 @@ def gateway_for(tmp_path, limits):
     spy = SpyTransport()
     client = PayPalSandboxClient(SandboxConfig("fake_client", "fake_secret", MERCHANT), spy)
     gateway = PaymentGateway(PaymentPolicy(store), store, store, SandboxPaymentAdapter(client),
-                             enable_sandbox_execution=True)
+                             enable_sandbox_execution=True, provider_mode=ProviderModeConfig.sandbox())
     return db, store, spy, gateway
 
 

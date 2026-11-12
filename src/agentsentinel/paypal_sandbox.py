@@ -80,8 +80,13 @@ class SandboxConfig:
 
     @classmethod
     def from_values(cls, values: dict[str, str]) -> "SandboxConfig":
-        if values.get("PAYPAL_ENVIRONMENT") != "sandbox":
-            raise SandboxError("PAYPAL_ENVIRONMENT must be sandbox")
+        environment = values.get("PAYPAL_ENVIRONMENT")
+        if (
+            not isinstance(environment, str)
+            or environment.strip() != environment
+            or environment.upper() != "SANDBOX"
+        ):
+            raise SandboxError("PAYPAL_ENVIRONMENT must be SANDBOX")
         fields = ("PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_MERCHANT_ID")
         if any(not values.get(field) or values[field].lower().startswith("your_") for field in fields):
             raise SandboxError("Sandbox client ID, secret, and merchant ID are required in ignored .env")

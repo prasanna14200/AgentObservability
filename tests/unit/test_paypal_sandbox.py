@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,7 @@ class FakeTransport:
 
 
 def client(*responses):
-    fake = FakeTransport((200, {"access_token": "private-token"}), *responses)
+    fake = FakeTransport((200, {"access_token": "sandbox-test-token-never-log"}), *responses)
     return PayPalSandboxClient(CONFIG, fake), fake
 
 
@@ -61,13 +62,44 @@ def test_mock_oauth_and_create_request():
     assert fake.calls[0][2]["Authorization"].startswith("Basic ")
     method, path, headers, body = fake.calls[1]
     assert (method, path) == ("POST", "/v2/checkout/orders")
-    assert fake.last_bearer_authorization == "Bearer private-token"
+    authorization_matches = hmac.compare_digest(
+        fake.last_bearer_authorization or "",
+        "Bearer sandbox-test-token-never-log",
+    )
+    assert authorization_matches is True
     assert headers["PayPal-Request-Id"] == request_id(CONFIG.merchant_id, "create", "purchase-001")
     assert json.loads(body) == {"intent": "CAPTURE", "purchase_units": [{
         "reference_id": "purchase-001", "amount": {"currency_code": "USD", "value": "1.00"},
         "payee": {"merchant_id": CONFIG.merchant_id},
     }]}
-    assert "private-token" not in repr(result)
+    token_exposed = "sandbox-test-token-never-log" in repr(result)
+    assert token_exposed is False
+
+
+def test_authenticated_api_call_passes_bearer_token_to_fake_transport_without_logging(caplog):
+    test_token = "unit-test-oauth-token-never-log"
+    transport = FakeTransport(
+        (200, {"access_token": test_token}),
+        (200, ORDER),
+    )
+    api = PayPalSandboxClient(CONFIG, transport)
+
+    result = api.get_order("ORDER123")
+
+    captured_authorization = transport.last_bearer_authorization
+    expected_authorization = f"Bearer {test_token}"
+    authorization_matches = hmac.compare_digest(
+        captured_authorization or "",
+        expected_authorization,
+    )
+    assert authorization_matches is True
+    token_in_result = test_token in repr(result)
+    token_in_logs = any(
+        test_token in record.getMessage()
+        for record in caplog.records
+    )
+    assert token_in_result is False
+    assert token_in_logs is False
 
 
 @pytest.mark.parametrize("amount", ["0.00", "10.01", "1", "1.001", "nan", "-1.00", "1e3"])
@@ -96,12 +128,62 @@ def test_missing_credentials_and_merchant_validation():
                                    "PAYPAL_CLIENT_SECRET": "b", "PAYPAL_MERCHANT_ID": "bad"})
 
 
+@pytest.mark.parametrize(
+    "missing_field",
+    ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_MERCHANT_ID"],
+)
+def test_missing_each_sandbox_credential_fails_without_exposing_values(missing_field):
+    values = {
+        "PAYPAL_ENVIRONMENT": "sandbox",
+        "PAYPAL_CLIENT_ID": "test-client-id-not-secret",
+        "PAYPAL_CLIENT_SECRET": "test-client-secret-not-real",
+        "PAYPAL_MERCHANT_ID": CONFIG.merchant_id,
+    }
+    values.pop(missing_field)
+
+    with pytest.raises(SandboxError) as exc_info:
+        SandboxConfig.from_values(values)
+
+    message = str(exc_info.value)
+    value_exposed = any(
+        value in message
+        for value in (
+            "test-client-id-not-secret",
+            "test-client-secret-not-real",
+            CONFIG.merchant_id,
+        )
+    )
+    assert value_exposed is False
+
+
 def test_oauth_failure_does_not_expose_response():
-    api, _ = client()
-    api.transport.responses[0] = (401, {"access_token": "secret-value", "message": "private"})
+    test_token = "oauth-failure-token-never-log"
+    api, fake = client()
+    api.transport.responses[0] = (
+        401,
+        {
+            "access_token": test_token,
+            "client_secret": "test-client-secret-not-real",
+            "message": "private provider detail",
+        },
+    )
     with pytest.raises(SandboxError, match="OAuth failed") as exc:
         api.create_order("purchase-001", "1.00")
-    assert "secret-value" not in str(exc.value)
+    message = str(exc.value)
+    sensitive_value_exposed = any(
+        value in message
+        for value in (
+            test_token,
+            "test-client-secret-not-real",
+            "private provider detail",
+        )
+    )
+    assert sensitive_value_exposed is False
+    api_request_sent = any(
+        path != "/v1/oauth2/token"
+        for _, path, _, _ in fake.calls
+    )
+    assert api_request_sent is False
 
 
 def test_create_failure_sanitized():

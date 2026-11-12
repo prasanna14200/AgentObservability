@@ -30,6 +30,7 @@ from agentsentinel.observability.payment_events import (  # noqa: E402
 )
 from agentsentinel.payment_gateway import AdapterOutcome, PaymentGateway, TestOnlyAdapter  # noqa: E402
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy  # noqa: E402
+from agentsentinel.payment_provider import ProviderModeConfig  # noqa: E402
 from agentsentinel.payment_sqlite import SQLitePaymentStore  # noqa: E402
 from agentsentinel.schema.payment import Money, PaymentIntent  # noqa: E402
 
@@ -105,6 +106,7 @@ def main() -> int:
             PaymentPolicy(payment_store, clock=lambda: NOW),
             payment_store,
             payment_store,
+            provider_mode=ProviderModeConfig.mock(),
         )
         decision_samples: list[int] = []
         for index in range(SAMPLES):
@@ -171,6 +173,7 @@ def main() -> int:
             concurrent_store,
             concurrent_store,
             adapter,
+            provider_mode=ProviderModeConfig.mock(),
         )
         with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(concurrent_gateway.submit, concurrent_intent, CONTEXT)

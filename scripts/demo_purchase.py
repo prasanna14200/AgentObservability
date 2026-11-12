@@ -19,6 +19,7 @@ from issue_authorization import (  # noqa: E402
 
 from agentsentinel.payment_gateway import PaymentGateway, TrustedGatewayEntryPoint  # noqa: E402
 from agentsentinel.payment_policy import PaymentPolicy  # noqa: E402
+from agentsentinel.payment_provider import ProviderModeConfig  # noqa: E402
 from agentsentinel.approval_service import ApprovalStore  # noqa: E402
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, SandboxStatusVerifier  # noqa: E402
 from agentsentinel.payment_sqlite import (
@@ -120,7 +121,7 @@ def _safe_failure_code(exc: Exception) -> str:
         if str(exc) in {"PayPal returned invalid JSON", "PayPal returned an invalid response shape",
                         "PayPal response exceeded size limit"}:
             return "INVALID_PROVIDER_RESPONSE"
-        if str(exc) in {"PAYPAL_ENVIRONMENT must be sandbox",
+        if str(exc) in {"PAYPAL_ENVIRONMENT must be SANDBOX",
                         "Sandbox client ID, secret, and merchant ID are required in ignored .env",
                         "Invalid Sandbox merchant ID"}:
             return "SANDBOX_CONFIGURATION_INVALID"
@@ -272,7 +273,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             issue_after_local_confirmation(DEMO_DB, intent)
         gateway = PaymentGateway(PaymentPolicy(store), store, store, SandboxPaymentAdapter(client),
-                                 enable_sandbox_execution=True, kill_switch=approvals)
+                                 enable_sandbox_execution=True, kill_switch=approvals,
+                                 provider_mode=ProviderModeConfig.sandbox())
         result = TrustedGatewayEntryPoint(gateway, DemoSession()).submit(intent)
         print(json.dumps(_safe_result(result, _local_snapshot(DEMO_DB, intent.operation_id)), sort_keys=True))
         return 0 if result.status == "COMPLETED" else 2

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentSentinel synthetic evaluator</title>
+    <link rel="stylesheet" href="/dashboard/static/dashboard.css" />
+    <script src="/dashboard/static/evaluator.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/evaluator">AgentSentinel <span>PUBLIC EVALUATOR</span></a>
+      <span class="badge demo-badge">SYNTHETIC · MOCK ONLY</span>
+    </header>
+    <main class="page">
+      <p class="warning" role="note">Synthetic demonstration — no real payments or PayPal actions.</p>
+      <div class="page-heading">
+        <div>
+          <p class="eyebrow">BOUNDED SCENARIOS · ACTUAL AGENTSENTINEL TRACE PIPELINE</p>
+          <h1>Run a safety scenario</h1>
+          <p class="muted">Choose a predefined workflow. The backend records its simulated tool calls, applies the existing detector rules and permission check, and stores the resulting evidence.</p>
+        </div>
+      </div>
+      <section class="panel">
+        <form id="scenario-form" class="inline-form">
+          <label for="scenario">Synthetic scenario</label>
+          <select id="scenario" name="scenario" required>
+            {% for key, scenario in scenarios.items() %}
+              <option value="{{ key }}">{{ scenario.label }} — {{ scenario.description }}</option>
+            {% endfor %}
+          </select>
+          <button class="button" type="submit">Run Scenario</button>
+        </form>
+        <p id="run-message" role="status" aria-live="polite"></p>
+      </section>
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Execution evidence</h2>
+          <button id="refresh-executions" class="button subtle" type="button">Refresh saved executions</button>
+        </div>
+        <p class="muted">Completed runs are retrieved from the evaluator's SQLite store. Recent evidence may disappear after restart or redeployment because the hosting filesystem is ephemeral.</p>
+        <div id="execution-detail" aria-live="polite">
+          <p class="muted">Run a scenario or select a saved request below.</p>
+        </div>
+      </section>
+      <section class="panel">
+        <h2>Recent requests</h2>
+        <ul id="execution-list" class="execution-list"></ul>
+      </section>
+    </main>
+  </body>
+</html>

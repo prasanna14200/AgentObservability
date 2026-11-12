@@ -16,8 +16,14 @@ from typing import Callable, Iterator, Literal, Protocol
 
 from pydantic import AwareDatetime, field_validator, model_validator
 
-from agentsentinel.payment_gateway import GatewayResult, Reservation, _fingerprint
+from agentsentinel.payment_gateway import (
+    GatewayResult,
+    Reservation,
+    _fingerprint,
+    _legacy_fingerprint,
+)
 from agentsentinel.payment_policy import AuthenticatedScope, PolicyDecision
+from agentsentinel.payment_provider import ProviderMode
 from agentsentinel.paypal_sandbox import request_id
 from agentsentinel.schema.payment import Money, PaymentAuthorization, PaymentIntent, PaymentModel, _check_id
 
@@ -47,6 +53,7 @@ class SafetyLimits:
 
 class ReconciliationSnapshot(PaymentModel):
     operation_id: str
+    provider_mode: ProviderMode = "MOCK"
     state: Literal["RESERVED", "CLAIMED", "UNCERTAIN"]
     dispatch_state: Literal["NOT_DISPATCHED", "MAY_HAVE_DISPATCHED"]
     action: Literal["create_order", "capture_order"]
@@ -65,6 +72,7 @@ class VerifiedOutcome(PaymentModel):
     """Result from a trusted verifier, never from an agent or raw provider JSON."""
 
     operation_id: str
+    provider_mode: ProviderMode = "MOCK"
     status: Literal["COMPLETED", "NO_PAYMENT", "STILL_UNCERTAIN"]
     attempt_id: str | None
     idempotency_key: str | None
@@ -98,6 +106,8 @@ class OperationAudit(PaymentModel):
     """Bounded status view for the trusted demo CLI; no request body or credentials."""
 
     operation_id: str
+    provider_mode: ProviderMode = "MOCK"
+    attempt_provider_mode: ProviderMode | None = None
     state: Literal["RESERVED", "CLAIMED", "COMPLETED", "REJECTED", "REVIEW_REQUIRED", "UNCERTAIN"]
     dispatch_state: Literal["NOT_DISPATCHED", "MAY_HAVE_DISPATCHED"]
     attempt_id: str | None
@@ -185,6 +195,8 @@ class SQLitePaymentStore:
                 conn.executescript("""
                     CREATE TABLE IF NOT EXISTS operations (
                         operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,
+                        provider_mode TEXT NOT NULL DEFAULT 'MOCK'
+                          CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE')),
                         principal_id TEXT NOT NULL, scope_id TEXT NOT NULL,
                         intent_id TEXT NOT NULL, merchant_id TEXT NOT NULL,
                         amount_text TEXT NOT NULL, currency TEXT NOT NULL,
@@ -194,6 +206,8 @@ class SQLitePaymentStore:
                         dispatch_state TEXT NOT NULL DEFAULT 'NOT_DISPATCHED'
                           CHECK(dispatch_state IN ('NOT_DISPATCHED','MAY_HAVE_DISPATCHED')),
                         result_json TEXT, authorization_id TEXT, attempt_id TEXT,
+                        attempt_provider_mode TEXT
+                          CHECK(attempt_provider_mode IS NULL OR attempt_provider_mode IN ('MOCK','SANDBOX','LIVE')),
                         idempotency_key TEXT, provider_order_id TEXT, provider_capture_id TEXT,
                         updated_at TEXT NOT NULL
                     );
@@ -203,6 +217,8 @@ class SQLitePaymentStore:
                         intent_id TEXT NOT NULL, operation_id TEXT NOT NULL,
                         merchant_id TEXT NOT NULL, amount_text TEXT NOT NULL,
                         currency TEXT NOT NULL, action TEXT NOT NULL,
+                        provider_mode TEXT NOT NULL DEFAULT 'MOCK'
+                          CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE')),
                         target_order_id TEXT, issued_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN
                           ('issued','revoked','consumed','expired')),
@@ -214,6 +230,8 @@ class SQLitePaymentStore:
                         event_id INTEGER PRIMARY KEY, operation_id TEXT NOT NULL,
                         from_state TEXT, to_state TEXT NOT NULL,
                         event_type TEXT NOT NULL, occurred_at TEXT NOT NULL,
+                        provider_mode TEXT NOT NULL DEFAULT 'MOCK'
+                          CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE')),
                         actor_role TEXT NOT NULL DEFAULT 'application', reason_code TEXT
                     );
                     CREATE TABLE IF NOT EXISTS operation_attempts (
@@ -227,6 +245,33 @@ class SQLitePaymentStore:
                     operation_columns = {
                         row["name"] for row in conn.execute("PRAGMA table_info(operations)")
                     }
+                    if "provider_mode" not in operation_columns:
+                        conn.execute(
+                            "ALTER TABLE operations ADD COLUMN provider_mode TEXT NOT NULL "
+                            "DEFAULT 'MOCK' CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE'))"
+                        )
+                    if "attempt_provider_mode" not in operation_columns:
+                        conn.execute(
+                            "ALTER TABLE operations ADD COLUMN attempt_provider_mode TEXT "
+                            "CHECK(attempt_provider_mode IS NULL OR attempt_provider_mode IN "
+                            "('MOCK','SANDBOX','LIVE'))"
+                        )
+                    authorization_columns = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(authorizations)")
+                    }
+                    if "provider_mode" not in authorization_columns:
+                        conn.execute(
+                            "ALTER TABLE authorizations ADD COLUMN provider_mode TEXT NOT NULL "
+                            "DEFAULT 'MOCK' CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE'))"
+                        )
+                    event_columns = {
+                        row["name"] for row in conn.execute("PRAGMA table_info(operation_events)")
+                    }
+                    if "provider_mode" not in event_columns:
+                        conn.execute(
+                            "ALTER TABLE operation_events ADD COLUMN provider_mode TEXT NOT NULL "
+                            "DEFAULT 'MOCK' CHECK(provider_mode IN ('MOCK','SANDBOX','LIVE'))"
+                        )
                     dispatch_state_was_missing = "dispatch_state" not in operation_columns
                     if dispatch_state_was_missing:
                         conn.execute(
@@ -279,23 +324,43 @@ class SQLitePaymentStore:
         kind: str,
         now: datetime,
         *,
+        provider_mode: ProviderMode = "MOCK",
         actor_role: str = "application",
         reason_code: str | None = None,
     ) -> None:
         conn.execute(
             "INSERT INTO operation_events(operation_id,from_state,to_state,event_type,occurred_at,"
-            "actor_role,reason_code) VALUES(?,?,?,?,?,?,?)",
-            (operation_id, before, after, kind, now.isoformat(), actor_role, reason_code),
+            "provider_mode,actor_role,reason_code) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                operation_id,
+                before,
+                after,
+                kind,
+                now.isoformat(),
+                provider_mode,
+                actor_role,
+                reason_code,
+            ),
         )
 
-    def reserve_intent(self, intent: PaymentIntent, context: AuthenticatedScope, fingerprint: str) -> Reservation:
+    def reserve_intent(
+        self,
+        intent: PaymentIntent,
+        context: AuthenticatedScope,
+        fingerprint: str,
+        provider_mode: ProviderMode = "MOCK",
+    ) -> Reservation:
         """Atomic new/duplicate decision across SQLite connections and processes."""
         try:
             intent = PaymentIntent.model_validate(intent.model_dump(mode="python"))
             context = AuthenticatedScope.model_validate(context.model_dump(mode="python"))
         except Exception:
             raise StoreUnavailable("invalid operation input") from None
-        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or fingerprint != _fingerprint(intent, context):
+        if (
+            not isinstance(fingerprint, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+            or fingerprint != _fingerprint(intent, context, provider_mode)
+        ):
             raise StoreUnavailable("invalid operation binding")
         try:
             now = self._now()
@@ -312,10 +377,16 @@ class SQLitePaymentStore:
                     return Reservation("SAFETY_BLOCK", guard_reason="OPERATION_LOOP_LIMIT")
                 if trace_count > self.limits.max_attempts_per_trace:
                     return Reservation("SAFETY_BLOCK", guard_reason="TRACE_LOOP_LIMIT")
-                row = conn.execute("SELECT fingerprint,state,result_json FROM operations WHERE operation_id=?",
+                row = conn.execute(
+                    "SELECT fingerprint,provider_mode,state,result_json FROM operations WHERE operation_id=?",
                                    (intent.operation_id,)).fetchone()
                 if row is not None:
-                    if row["fingerprint"] != fingerprint:
+                    is_legacy_mock = (
+                        provider_mode == "MOCK"
+                        and row["provider_mode"] == "MOCK"
+                        and row["fingerprint"] == _legacy_fingerprint(intent, context)
+                    )
+                    if row["fingerprint"] != fingerprint and not is_legacy_mock:
                         return Reservation("CONFLICT")
                     result = GatewayResult.model_validate_json(row["result_json"]) if row["result_json"] else None
                     return Reservation(row["state"], result)
@@ -342,14 +413,22 @@ class SQLitePaymentStore:
                     if spent_merchant + requested > int(self.limits.merchant_daily_spend_usd * 100):
                         return Reservation("SAFETY_BLOCK", guard_reason="MERCHANT_BUDGET_LIMIT")
                 conn.execute("""INSERT INTO operations
-                    (operation_id,fingerprint,principal_id,scope_id,intent_id,merchant_id,amount_text,currency,
+                    (operation_id,fingerprint,provider_mode,principal_id,scope_id,intent_id,merchant_id,amount_text,currency,
                      action,target_order_id,state,provider_order_id,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (intent.operation_id, fingerprint, context.principal_id, context.scope_id,
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (intent.operation_id, fingerprint, provider_mode, context.principal_id, context.scope_id,
                      intent.intent_id, intent.merchant_id, str(intent.money.amount), intent.money.currency,
                      intent.action, intent.target_order_id, "RESERVED", None, now.isoformat()),
                 )
-                self._event(conn, intent.operation_id, None, "RESERVED", "reserve", now)
+                self._event(
+                    conn,
+                    intent.operation_id,
+                    None,
+                    "RESERVED",
+                    "reserve",
+                    now,
+                    provider_mode=provider_mode,
+                )
                 return Reservation("NEW")
         except Exception:
             raise StoreUnavailable("operation reservation unavailable") from None
@@ -360,7 +439,8 @@ class SQLitePaymentStore:
             "scope_id": row["scope_id"], "intent_id": row["intent_id"],
             "operation_id": row["operation_id"], "merchant_id": row["merchant_id"],
             "money": Money(amount=row["amount_text"], currency=row["currency"]),
-            "action": row["action"], "target_order_id": row["target_order_id"],
+            "action": row["action"], "provider_mode": row["provider_mode"],
+            "target_order_id": row["target_order_id"],
             "issued_at": row["issued_at"], "expires_at": row["expires_at"],
             "status": row["status"], "closed_at": row["closed_at"],
             "record_origin": row["record_origin"],
@@ -401,15 +481,21 @@ class SQLitePaymentStore:
             decision = PolicyDecision.model_validate(decision.model_dump(mode="python"))
         except Exception:
             return False
-        if decision.outcome != "ALLOW" or decision.operation_id != intent.operation_id:
+        provider_mode = decision.provider_mode
+        if (
+            decision.outcome != "ALLOW"
+            or decision.operation_id != intent.operation_id
+            or provider_mode == "LIVE"
+        ):
             return False
         try:
             now = self._now()
-            fingerprint = _fingerprint(intent, context)
+            fingerprint = _fingerprint(intent, context, provider_mode)
             with self._write() as conn:
                 operation = conn.execute("SELECT * FROM operations WHERE operation_id=?",
                                          (intent.operation_id,)).fetchone()
                 if (operation is None or operation["fingerprint"] != fingerprint
+                        or operation["provider_mode"] != provider_mode
                         or operation["state"] != "RESERVED"):
                     return False
                 if require_kill_switch:
@@ -434,7 +520,8 @@ class SQLitePaymentStore:
                 if row is None:
                     return False
                 record = self._authorization(row)
-                if (record.issuer_id != self.trusted_issuer_id or not record.binds_to(intent)
+                if (record.issuer_id != self.trusted_issuer_id
+                        or not record.binds_to(intent, provider_mode)
                         or record.status != "issued" or not record.issued_at <= now < record.expires_at):
                     return False
                 changed = conn.execute("""UPDATE authorizations SET status='consumed',closed_at=?
@@ -448,12 +535,27 @@ class SQLitePaymentStore:
                 kind = "create" if intent.action == "create_order" else "capture"
                 key = request_id(intent.merchant_id, kind, intent.operation_id)
                 changed = conn.execute("""UPDATE operations SET state='CLAIMED',authorization_id=?,
-                    attempt_id=?,idempotency_key=?,dispatch_state='NOT_DISPATCHED',updated_at=?
+                    attempt_id=?,attempt_provider_mode=?,idempotency_key=?,dispatch_state='NOT_DISPATCHED',updated_at=?
                     WHERE operation_id=? AND state='RESERVED'""",
-                    (record.authorization_id, attempt_id, key, now.isoformat(), intent.operation_id)).rowcount
+                    (
+                        record.authorization_id,
+                        attempt_id,
+                        provider_mode,
+                        key,
+                        now.isoformat(),
+                        intent.operation_id,
+                    )).rowcount
                 if changed != 1:
                     raise StoreUnavailable("authorization claim unavailable")
-                self._event(conn, intent.operation_id, "RESERVED", "CLAIMED", "claim", now)
+                self._event(
+                    conn,
+                    intent.operation_id,
+                    "RESERVED",
+                    "CLAIMED",
+                    "claim",
+                    now,
+                    provider_mode=provider_mode,
+                )
                 return True
         except Exception:
             raise StoreUnavailable("authorization claim unavailable") from None
@@ -465,6 +567,15 @@ class SQLitePaymentStore:
         try:
             now = self._now()
             with self._write() as conn:
+                operation = conn.execute(
+                    "SELECT provider_mode FROM operations WHERE operation_id=? AND fingerprint=?",
+                    (operation_id, fingerprint),
+                ).fetchone()
+                if operation is None:
+                    return False
+                provider_mode = operation["provider_mode"]
+                if provider_mode == "LIVE":
+                    return False
                 if require_kill_switch:
                     has_kill_switch = conn.execute(
                         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='kill_switch'"
@@ -483,7 +594,8 @@ class SQLitePaymentStore:
                 changed = conn.execute(
                     "UPDATE operations SET dispatch_state='MAY_HAVE_DISPATCHED',updated_at=? "
                     "WHERE operation_id=? AND fingerprint=? AND state='CLAIMED' "
-                    "AND dispatch_state='NOT_DISPATCHED'",
+                    "AND dispatch_state='NOT_DISPATCHED' "
+                    "AND attempt_provider_mode=provider_mode",
                     (now.isoformat(), operation_id, fingerprint),
                 ).rowcount
                 if changed != 1:
@@ -495,6 +607,7 @@ class SQLitePaymentStore:
                     "CLAIMED",
                     "dispatch_intent",
                     now,
+                    provider_mode=provider_mode,
                     reason_code="PROVIDER_MAY_HAVE_RECEIVED_REQUEST",
                 )
                 return True
@@ -507,12 +620,15 @@ class SQLitePaymentStore:
             now = self._now()
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT state,fingerprint,dispatch_state FROM operations WHERE operation_id=?",
+                    "SELECT state,fingerprint,dispatch_state,provider_mode,attempt_provider_mode "
+                    "FROM operations WHERE operation_id=?",
                                    (operation_id,)).fetchone()
                 if (row is None or row["fingerprint"] != fingerprint or result.operation_id != operation_id
+                        or result.provider_mode != row["provider_mode"]
                         or (row["state"] == "RESERVED" and result.status not in {"REJECTED", "REVIEW_REQUIRED"})
                         or (row["state"] == "CLAIMED" and (
                             row["dispatch_state"] not in {"NOT_DISPATCHED", "MAY_HAVE_DISPATCHED"}
+                            or row["attempt_provider_mode"] != row["provider_mode"]
                             or (result.status in {"COMPLETED", "UNCERTAIN"}
                                 and row["dispatch_state"] != "MAY_HAVE_DISPATCHED")
                             or (result.status == "REJECTED"
@@ -530,7 +646,15 @@ class SQLitePaymentStore:
                     provider_capture_id=COALESCE(?,provider_capture_id),updated_at=? WHERE operation_id=?""",
                     (result.status, result.model_dump_json(), result.provider_order_id,
                      result.provider_capture_id, now.isoformat(), operation_id))
-                self._event(conn, operation_id, row["state"], result.status, "finish", now)
+                self._event(
+                    conn,
+                    operation_id,
+                    row["state"],
+                    result.status,
+                    "finish",
+                    now,
+                    provider_mode=row["provider_mode"],
+                )
         except Exception:
             raise StoreUnavailable("operation finalization unavailable") from None
 
@@ -547,7 +671,7 @@ class SQLitePaymentStore:
             rows_scanned = not_dispatched = marked_uncertain = 0
             with self._write() as conn:
                 rows = conn.execute(
-                    "SELECT operation_id,state,dispatch_state,fingerprint,updated_at "
+                    "SELECT operation_id,state,dispatch_state,provider_mode,fingerprint,updated_at "
                     "FROM operations WHERE state IN ('RESERVED','CLAIMED') "
                     "AND julianday(updated_at)<=julianday(?) "
                     "ORDER BY julianday(updated_at),operation_id LIMIT ?",
@@ -561,6 +685,7 @@ class SQLitePaymentStore:
                     if row["dispatch_state"] == "MAY_HAVE_DISPATCHED":
                         result = GatewayResult(
                             operation_id=operation_id,
+                            provider_mode=row["provider_mode"],
                             decision=None,
                             status="UNCERTAIN",
                             reason_codes=("RECONCILIATION_REQUIRED",),
@@ -571,6 +696,7 @@ class SQLitePaymentStore:
                     else:
                         result = GatewayResult(
                             operation_id=operation_id,
+                            provider_mode=row["provider_mode"],
                             decision=None,
                             status="REJECTED",
                             reason_codes=("RECOVERY_NOT_DISPATCHED",),
@@ -601,6 +727,7 @@ class SQLitePaymentStore:
                         new_state,
                         "recovery",
                         now,
+                        provider_mode=row["provider_mode"],
                         actor_role="recovery",
                         reason_code=reason_code,
                     )
@@ -629,7 +756,8 @@ class SQLitePaymentStore:
         """Read-only safe operation view; application must control who can call it."""
         try:
             with closing(self._connect()) as conn:
-                row = conn.execute("""SELECT operation_id,state,dispatch_state,attempt_id,idempotency_key,
+                row = conn.execute("""SELECT operation_id,state,dispatch_state,provider_mode,
+                    attempt_provider_mode,attempt_id,idempotency_key,
                     provider_order_id,provider_capture_id FROM operations WHERE operation_id=?""",
                     (_check_id(operation_id, "operation identifier"),)).fetchone()
             return OperationAudit.model_validate(dict(row)) if row else None
@@ -643,7 +771,10 @@ class SQLitePaymentStore:
             if row is None or row["state"] not in {"RESERVED", "CLAIMED", "UNCERTAIN"}:
                 raise StoreUnavailable("operation is not reconcilable")
             return ReconciliationSnapshot(
-                operation_id=operation_id, state=row["state"], action=row["action"],
+                operation_id=operation_id,
+                provider_mode=row["provider_mode"],
+                state=row["state"],
+                action=row["action"],
                 merchant_id=row["merchant_id"], amount_text=row["amount_text"], currency=row["currency"],
                 target_order_id=row["target_order_id"],
                 attempt_id=row["attempt_id"], idempotency_key=row["idempotency_key"],
@@ -656,7 +787,11 @@ class SQLitePaymentStore:
 
     def _apply_verified(self, snapshot: ReconciliationSnapshot, outcome: VerifiedOutcome) -> GatewayResult:
         """Internal transition; caller must be the trusted reconciler, not an agent."""
-        if (outcome.operation_id != snapshot.operation_id or outcome.attempt_id != snapshot.attempt_id
+        if snapshot.provider_mode == "LIVE":
+            raise StoreUnavailable("LIVE reconciliation is disabled")
+        if (outcome.operation_id != snapshot.operation_id
+                or outcome.provider_mode != snapshot.provider_mode
+                or outcome.attempt_id != snapshot.attempt_id
                 or outcome.idempotency_key != snapshot.idempotency_key):
             raise StoreUnavailable("verified outcome does not match operation")
         if outcome.status == "COMPLETED" and (snapshot.attempt_id is None
@@ -687,17 +822,28 @@ class SQLitePaymentStore:
         reason = ("VERIFIED_COMPLETED" if status == "COMPLETED" else
                   "VERIFIED_NO_PAYMENT" if status == "REJECTED" else "RECONCILIATION_REQUIRED")
         result = GatewayResult(operation_id=snapshot.operation_id, decision=None,
+                               provider_mode=snapshot.provider_mode,
                                status=status, reason_codes=(reason,))
         try:
             with self._write() as conn:
                 row = conn.execute(
-                    "SELECT state,fingerprint,attempt_id,idempotency_key,dispatch_state,result_json "
+                    "SELECT state,fingerprint,provider_mode,attempt_provider_mode,attempt_id,"
+                    "idempotency_key,dispatch_state,result_json "
                     "FROM operations WHERE operation_id=?",
                                    (snapshot.operation_id,)).fetchone()
                 if (row is None or row["fingerprint"] != snapshot.fingerprint
                         or row["state"] != snapshot.state
                         or row["attempt_id"] != snapshot.attempt_id
                         or row["idempotency_key"] != snapshot.idempotency_key
+                        or row["provider_mode"] != snapshot.provider_mode
+                        or (
+                            snapshot.attempt_id is not None
+                            and row["attempt_provider_mode"] != snapshot.provider_mode
+                        )
+                        or (
+                            snapshot.attempt_id is None
+                            and row["attempt_provider_mode"] is not None
+                        )
                         or row["dispatch_state"] != snapshot.dispatch_state):
                     raise StoreUnavailable("operation changed during reconciliation")
                 if outcome.status == "STILL_UNCERTAIN" and row["state"] == "UNCERTAIN":
@@ -709,8 +855,15 @@ class SQLitePaymentStore:
                     (status, result.model_dump_json(), outcome.provider_order_id or snapshot.provider_order_id,
                      outcome.provider_capture_id or snapshot.provider_capture_id,
                      outcome.verified_at.isoformat(), snapshot.operation_id))
-                self._event(conn, snapshot.operation_id, row["state"], status, "verified_reconciliation",
-                            outcome.verified_at)
+                self._event(
+                    conn,
+                    snapshot.operation_id,
+                    row["state"],
+                    status,
+                    "verified_reconciliation",
+                    outcome.verified_at,
+                    provider_mode=snapshot.provider_mode,
+                )
             return result
         except Exception:
             raise StoreUnavailable("reconciliation update unavailable") from None
@@ -728,6 +881,16 @@ class SQLiteReconciler:
     def reconcile(self, operation_id: str) -> GatewayResult:
         """No agent-supplied status argument; never retries an adapter operation."""
         snapshot = self._store._snapshot(_check_id(operation_id, "operation identifier"))
+        if snapshot.provider_mode == "LIVE":
+            raise StoreUnavailable("LIVE reconciliation is disabled")
+        if (
+            (snapshot.provider_mode == "MOCK" and not isinstance(self._verifier, TestOnlyOutcomeVerifier))
+            or (
+                snapshot.provider_mode == "SANDBOX"
+                and not isinstance(self._verifier, SandboxReadOnlyVerifier)
+            )
+        ):
+            raise StoreUnavailable("provider verifier does not match operation mode")
         try:
             outcome = self._verifier.verify(snapshot)
         except Exception:

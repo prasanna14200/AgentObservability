@@ -200,8 +200,10 @@ def test_operation_finalization_failure_stays_non_retryable(tmp_path):
     adapter = CountingAdapter()
 
     class FinishFailure:
-        def reserve_intent(self, request, context, fingerprint):
-            return payment_store.reserve_intent(request, context, fingerprint)
+        def reserve_intent(self, request, context, fingerprint, provider_mode="MOCK"):
+            return payment_store.reserve_intent(
+                request, context, fingerprint, provider_mode
+            )
 
         def mark_dispatch_intent(self, operation_id, fingerprint):
             return payment_store.mark_dispatch_intent(operation_id, fingerprint)

@@ -675,6 +675,12 @@ def test_old_claimed_rows_migrate_conservatively_to_may_have_dispatched(tmp_path
         states = dict(
             conn.execute("SELECT operation_id,dispatch_state FROM operations").fetchall()
         )
+        provider_modes = dict(
+            conn.execute("SELECT operation_id,provider_mode FROM operations").fetchall()
+        )
+        attempt_modes = dict(
+            conn.execute("SELECT operation_id,attempt_provider_mode FROM operations").fetchall()
+        )
         event_columns = {row[1] for row in conn.execute("PRAGMA table_info(operation_events)")}
 
     assert states == {
@@ -682,6 +688,18 @@ def test_old_claimed_rows_migrate_conservatively_to_may_have_dispatched(tmp_path
         "legacy_claimed": "MAY_HAVE_DISPATCHED",
         "legacy_uncertain": "MAY_HAVE_DISPATCHED",
         "legacy_completed": "MAY_HAVE_DISPATCHED",
+    }
+    assert provider_modes == {
+        "legacy_reserved": "MOCK",
+        "legacy_claimed": "MOCK",
+        "legacy_uncertain": "MOCK",
+        "legacy_completed": "MOCK",
+    }
+    assert attempt_modes == {
+        "legacy_reserved": None,
+        "legacy_claimed": None,
+        "legacy_uncertain": None,
+        "legacy_completed": None,
     }
     assert {"actor_role", "reason_code"} <= event_columns
 

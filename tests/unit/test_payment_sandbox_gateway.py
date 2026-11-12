@@ -10,6 +10,7 @@ import pytest
 
 from agentsentinel.payment_gateway import PaymentGateway
 from agentsentinel.payment_policy import AuthenticatedScope, PaymentPolicy
+from agentsentinel.payment_provider import ProviderModeConfig
 from agentsentinel.payment_sandbox_adapter import SandboxPaymentAdapter, SandboxStatusVerifier
 from agentsentinel.payment_sqlite import SQLitePaymentStore, SQLiteReconciler
 from agentsentinel.paypal_sandbox import PayPalSandboxClient, SandboxConfig, SandboxError
@@ -36,16 +37,17 @@ def seed(db, intent, *, amount=None, merchant=None):
         merchant_id=merchant or intent.merchant_id,
         money=Money(amount=amount or str(intent.money.amount), currency="USD"),
         action=intent.action, target_order_id=intent.target_order_id,
+        provider_mode="SANDBOX",
         issued_at=now - timedelta(minutes=1), expires_at=now + timedelta(minutes=5),
         status="issued", record_origin="application_issued")
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("""INSERT INTO authorizations
             (authorization_id,issuer_id,principal_id,scope_id,intent_id,operation_id,merchant_id,
-             amount_text,currency,action,target_order_id,issued_at,expires_at,status,closed_at,record_origin)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             amount_text,currency,action,provider_mode,target_order_id,issued_at,expires_at,status,closed_at,record_origin)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (auth.authorization_id, auth.issuer_id, CONTEXT.principal_id, auth.scope_id,
              auth.intent_id, auth.operation_id, auth.merchant_id, str(auth.money.amount),
-             auth.money.currency, auth.action, auth.target_order_id,
+             auth.money.currency, auth.action, auth.provider_mode, auth.target_order_id,
              auth.issued_at.isoformat(), auth.expires_at.isoformat(), auth.status,
              None, auth.record_origin))
 
@@ -56,7 +58,7 @@ def setup(tmp_path, *, timeout_post=False):
     spy = SpyTransport(timeout_post=timeout_post)
     client = PayPalSandboxClient(SandboxConfig("fake_client", "fake_secret", MERCHANT), spy)
     gateway = PaymentGateway(PaymentPolicy(store), store, store, SandboxPaymentAdapter(client),
-                             enable_sandbox_execution=True)
+                             enable_sandbox_execution=True, provider_mode=ProviderModeConfig.sandbox())
     return db, store, spy, client, gateway
 
 
@@ -174,7 +176,8 @@ def test_manual_issuer_binds_fields_without_a_provider_call(tmp_path):
     record = issue_after_local_confirmation(db, intent)
     trusted = SQLitePaymentStore(db, trusted_issuer_id=record.issuer_id)
     found = trusted.find(demo_context(), intent.intent_id, intent.operation_id)
-    assert found == record and found.binds_to(intent)
+    assert found == record and found.provider_mode == "SANDBOX"
+    assert found.binds_to(intent, "SANDBOX")
     assert trusted.find(CONTEXT, intent.intent_id, intent.operation_id) is None
     assert spy.calls == []
 
@@ -188,6 +191,7 @@ def test_read_only_verifier_checks_capture_status_without_post(tmp_path):
     before = len([call for call in spy.calls if call[0] == "POST"])
     snapshot = ReconciliationSnapshot(
         operation_id=capture.operation_id, state="UNCERTAIN", dispatch_state="MAY_HAVE_DISPATCHED",
+        provider_mode="SANDBOX",
         action="capture_order",
         merchant_id=MERCHANT, amount_text="1.00", currency="USD",
         target_order_id="ORDER123", attempt_id="attempt_001", idempotency_key=None,
@@ -237,6 +241,7 @@ def test_capture_reconciliation_requires_bound_evidence_and_never_posts(tmp_path
     before_posts = [call for call in spy.calls if call[0] == "POST"]
     snapshot = ReconciliationSnapshot(
         operation_id="demo_capture",
+        provider_mode="SANDBOX",
         state="UNCERTAIN",
         dispatch_state="MAY_HAVE_DISPATCHED",
         action="capture_order",

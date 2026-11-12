@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AgentSentinel Control Center</title>
     <link rel="stylesheet" href="/dashboard/static/dashboard.css" />
+    <script src="/dashboard/static/transactions.js" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -27,7 +28,7 @@
         <div>
           <p class="eyebrow">PAYMENT SAFETY · LOCAL ONLY</p>
           <h1>Overview</h1>
-          <p class="muted">{% if demo_mode %}Isolated seeded mock operations and audit telemetry.{% else %}Persisted operational data only. Synthetic demo data is kept separate.{% endif %}</p>
+          <p class="muted">{% if demo_mode %}Isolated seeded mock operations and audit telemetry.{% else %}Persisted operational data only. Synthetic demo data is kept separate. Manual Sandbox evidence is labeled separately from gateway operations.{% endif %}</p>
         </div>
         <span class="badge">Authenticated · {{ role }}</span>
       </div>
@@ -49,6 +50,33 @@
             <small>{{ metrics[key].source }}<br />{{ metrics[key].time_range }}</small>
           </article>
         {% endfor %}
+      </section>
+      <section class="panel" aria-labelledby="transactions-heading">
+        <div class="panel-heading">
+          <div>
+            <h2 id="transactions-heading">Persisted transactions</h2>
+            <p class="muted">Gateway operations and manual Sandbox evidence are labeled separately. Latest 100 records.</p>
+          </div>
+          <button class="button subtle" id="refresh-transactions" type="button">Refresh</button>
+        </div>
+        <p id="transaction-load-status" class="muted" role="status" aria-live="polite">Loading transaction data…</p>
+        <div class="metric-grid compact" aria-label="Transaction summary">
+          <article class="metric-card"><p class="metric-label">Records shown</p><strong id="transaction-count">—</strong></article>
+          <article class="metric-card"><p class="metric-label">Pending</p><strong id="transaction-pending">—</strong></article>
+          <article class="metric-card"><p class="metric-label">Completed</p><strong id="transaction-completed">—</strong></article>
+          <article class="metric-card"><p class="metric-label">Failed / reconciliation error</p><strong id="transaction-failed">—</strong></article>
+          <article class="metric-card"><p class="metric-label">Totals by currency</p><strong id="transaction-totals">—</strong></article>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Operation</th><th>Source</th><th>Provider</th><th>Amount</th><th>Status</th><th>Provider state</th><th>Order / capture</th><th>Updated</th></tr>
+            </thead>
+            <tbody id="transaction-rows">
+              <tr><td colspan="8" class="muted">Loading persisted records…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
       <section class="panel-grid">
         <article class="panel">

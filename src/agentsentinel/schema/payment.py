@@ -8,6 +8,8 @@ from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agentsentinel.payment_provider import ProviderMode
+
 
 class PaymentModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
@@ -113,6 +115,7 @@ class PaymentAuthorization(PaymentModel):
     merchant_id: Identifier
     money: Money
     action: PaymentAction
+    provider_mode: ProviderMode = "MOCK"
     target_order_id: Identifier | None = None
     issued_at: AwareDatetime
     expires_at: AwareDatetime
@@ -156,10 +159,11 @@ class PaymentAuthorization(PaymentModel):
             raise ValueError("closure cannot precede issuance")
         return self
 
-    def binds_to(self, intent: PaymentIntent) -> bool:
+    def binds_to(self, intent: PaymentIntent, provider_mode: ProviderMode = "MOCK") -> bool:
         """Compare request fields only; a match is never proof of consent or permission."""
         return all(
             (
+                self.provider_mode == provider_mode,
                 self.intent_id == intent.intent_id,
                 self.operation_id == intent.operation_id,
                 self.scope_id == intent.scope_id,
